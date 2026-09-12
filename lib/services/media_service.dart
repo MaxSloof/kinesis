@@ -179,6 +179,17 @@ class LocalStore {
 class TrashService {
   static const _channel = MethodChannel('com.maxsloof.kinesis/trash');
 
-  Future<void> moveToTrash(String filePath) =>
-      _channel.invokeMethod<void>('moveToTrash', {'path': filePath});
+  Future<void> moveToTrash(String filePath) async {
+    if (Platform.isLinux) {
+      final result = await Process.run('gio', ['trash', filePath]);
+      if (result.exitCode != 0) {
+        throw FileSystemException(
+          'Could not move file to Trash: ${result.stderr}',
+          filePath,
+        );
+      }
+      return;
+    }
+    await _channel.invokeMethod<void>('moveToTrash', {'path': filePath});
+  }
 }

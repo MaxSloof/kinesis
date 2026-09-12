@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'domain/media.dart';
 import 'services/media_service.dart';
+import 'shortcuts.dart';
 
 void main() => runApp(const KinesisApp());
 
@@ -242,7 +243,7 @@ class _KinesisHomeState extends State<KinesisHome> {
   Widget build(BuildContext context) => CallbackShortcuts(
     bindings: {
       for (final decision in ReviewDecision.values)
-        SingleActivator(_keyFor(_shortcuts[decision]!)): () =>
+        SingleActivator(logicalKeyForShortcut(_shortcuts[decision]!)): () =>
             _decide(decision),
     },
     child: Focus(
@@ -389,9 +390,6 @@ class _KinesisHomeState extends State<KinesisHome> {
         onPressed: () => _decide(decision),
         child: Text('$key  $label'),
       );
-
-  LogicalKeyboardKey _keyFor(String key) =>
-      LogicalKeyboardKey(key.toUpperCase().codeUnitAt(0));
 
   Future<void> _showSettings() async {
     final controller = TextEditingController(text: _template);

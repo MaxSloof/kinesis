@@ -46,26 +46,17 @@ class ImportPlan {
 class ImportPlanner {
   const ImportPlanner();
 
-  ImportPlan plan(
-    ReviewItem item,
-    ReviewDecision decision,
-    Set<String> existingHashes,
-  ) {
+  ImportPlan plan(ReviewItem item, ReviewDecision decision) {
     final selected = switch (decision) {
       ReviewDecision.keepBoth => item.files,
       ReviewDecision.keepJpeg => item.jpeg == null ? item.files : [item.jpeg!],
       ReviewDecision.keepCr3 => item.cr3 == null ? item.files : [item.cr3!],
       ReviewDecision.deleteBoth => const <MediaFile>[],
     };
-    final skipped = selected
-        .where(
-          (file) => file.hash != null && existingHashes.contains(file.hash),
-        )
-        .toList();
     return ImportPlan(
-      toImport: selected.where((file) => !skipped.contains(file)).toList(),
+      toImport: selected,
       toDelete: item.files,
-      skipped: skipped,
+      skipped: const [],
     );
   }
 }

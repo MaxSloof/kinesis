@@ -119,19 +119,9 @@ class _KinesisHomeState extends State<KinesisHome> {
     setState(() => _scanning = true);
     try {
       final scanned = await _media.scan(selected);
-      final hashed = <ReviewItem>[];
-      for (final item in scanned) {
-        hashed.add(
-          ReviewItem(
-            jpeg: item.jpeg == null ? null : await _withHash(item.jpeg!),
-            cr3: item.cr3 == null ? null : await _withHash(item.cr3!),
-            single: item.single == null ? null : await _withHash(item.single!),
-          ),
-        );
-      }
       if (mounted) {
         setState(() {
-          _items = hashed;
+          _items = scanned;
           _decisions.clear();
           _current = 0;
         });
@@ -146,9 +136,6 @@ class _KinesisHomeState extends State<KinesisHome> {
       if (mounted) setState(() => _scanning = false);
     }
   }
-
-  Future<MediaFile> _withHash(MediaFile file) async =>
-      file.withHash(await _media.hashFile(file.path));
 
   void _decide(ReviewDecision decision) {
     if (_items.isEmpty) return;
@@ -167,11 +154,7 @@ class _KinesisHomeState extends State<KinesisHome> {
     final plan = _decisions.entries.fold(
       const ImportPlan(toImport: [], toDelete: [], skipped: []),
       (total, entry) {
-        final next = planner.plan(
-          _items[entry.key],
-          entry.value,
-          _existingHashes,
-        );
+        final next = planner.plan(_items[entry.key], entry.value);
         return ImportPlan(
           toImport: [...total.toImport, ...next.toImport],
           toDelete: [...total.toDelete, ...next.toDelete],
@@ -185,8 +168,8 @@ class _KinesisHomeState extends State<KinesisHome> {
       builder: (context) => AlertDialog(
         title: const Text('Confirm ingest plan'),
         content: Text(
-          '${plan.toImport.length} files will be copied and SHA-256 verified.\n'
-          '${plan.skipped.length} files already exist in the library.\n'
+          '${plan.toImport.length} files will be checked, copied, and SHA-256 verified.\n'
+          'Already-imported files will be skipped before copying.\n'
           '${plan.toDelete.length} source files will move to Trash.\n\n'
           'Unreviewed items are unchanged.',
         ),
@@ -203,13 +186,22 @@ class _KinesisHomeState extends State<KinesisHome> {
       ),
     );
     if (approved != true) return;
-    final importedHashes = <String>{..._existingHashes};
+    final knownHashes = <String>{..._existingHashes};
     final importedAssets = <ImportedAsset>[];
+    var skipped = 0;
     try {
       for (final file in plan.toImport) {
-        if (file.hash != null && !importedHashes.add(file.hash!)) continue;
+        final sourceHash = await _media.hashFile(file.path);
+        if (!knownHashes.add(sourceHash)) {
+          skipped++;
+          continue;
+        }
         importedAssets.add(
-          await _media.copyAndVerify(file, _library!, _template),
+          await _media.copyAndVerify(
+            file.withHash(sourceHash),
+            _library!,
+            _template,
+          ),
         );
       }
       _existingHashes.addAll(importedAssets.map((asset) => asset.hash));
@@ -221,9 +213,11 @@ class _KinesisHomeState extends State<KinesisHome> {
         }
       }
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('Ingest completed.')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Ingest completed. $skipped duplicates skipped.'),
+          ),
+        );
       }
     } on FileSystemException catch (error) {
       if (mounted) {
@@ -348,6 +342,9 @@ class _KinesisHomeState extends State<KinesisHome> {
                     : Image.file(
                         File(preview.path),
                         fit: BoxFit.contain,
+                        // Camera JPEGs are commonly 6000px wide. Decode only
+                        // enough pixels for a desktop review surface.
+                        cacheWidth: 1600,
                         errorBuilder: (_, _, _) => Text(item.label),
                       ),
               ),

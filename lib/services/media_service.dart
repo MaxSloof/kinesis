@@ -25,6 +25,9 @@ class MediaService {
       source,
     ).list(recursive: true, followLinks: false)) {
       if (entity is! File) continue;
+      // FAT/exFAT camera cards copied from macOS can contain AppleDouble
+      // metadata sidecars named `._<original-name>` that are not media.
+      if (path.basename(entity.path).startsWith('._')) continue;
       final kind = _extensions[path.extension(entity.path).toLowerCase()];
       if (kind != null) files.add(MediaFile(path: entity.path, kind: kind));
     }

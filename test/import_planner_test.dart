@@ -18,26 +18,23 @@ void main() {
   test(
     'keeping JPEG imports only it and plans both source files for deletion',
     () {
-      final plan = planner.plan(item, ReviewDecision.keepJpeg, {});
+      final plan = planner.plan(item, ReviewDecision.keepJpeg);
       expect(plan.toImport, [jpeg]);
       expect(plan.toDelete, [jpeg, cr3]);
     },
   );
 
-  test(
-    'already imported selected media is skipped but follows deletion plan',
-    () {
-      final plan = planner.plan(item, ReviewDecision.keepBoth, {'jpeg'});
-      expect(plan.toImport, [cr3]);
-      expect(plan.skipped, [jpeg]);
-      expect(plan.toDelete, [jpeg, cr3]);
-    },
-  );
+  test('planning does not require checksums before review', () {
+    final plan = planner.plan(item, ReviewDecision.keepBoth);
+    expect(plan.toImport, [jpeg, cr3]);
+    expect(plan.skipped, isEmpty);
+    expect(plan.toDelete, [jpeg, cr3]);
+  });
 
   test(
     'delete both does not import and schedules every paired source file',
     () {
-      final plan = planner.plan(item, ReviewDecision.deleteBoth, {});
+      final plan = planner.plan(item, ReviewDecision.deleteBoth);
       expect(plan.toImport, isEmpty);
       expect(plan.toDelete, [jpeg, cr3]);
     },
@@ -48,7 +45,6 @@ void main() {
     final plan = planner.plan(
       const ReviewItem(single: video),
       ReviewDecision.keepCr3,
-      {},
     );
     expect(plan.toImport, [video]);
     expect(plan.toDelete, [video]);

@@ -52,6 +52,8 @@ class _KinesisHomeState extends State<KinesisHome> {
   };
   int _current = 0;
   bool _scanning = false;
+  bool _gridMode = false;
+  final _selectedItems = <int>{};
 
   @override
   void initState() {
@@ -124,7 +126,9 @@ class _KinesisHomeState extends State<KinesisHome> {
         setState(() {
           _items = scanned;
           _decisions.clear();
+          _selectedItems.clear();
           _current = 0;
+          _gridMode = false;
         });
       }
     } on FileSystemException catch (error) {
@@ -141,6 +145,12 @@ class _KinesisHomeState extends State<KinesisHome> {
   void _decide(ReviewDecision decision) {
     if (_items.isEmpty) return;
     setState(() {
+      if (_gridMode && _selectedItems.isNotEmpty) {
+        for (final index in _selectedItems) {
+          _decisions[index] = decision;
+        }
+        return;
+      }
       _decisions[_current] = decision;
       if (_current < _items.length - 1) _current++;
     });
@@ -262,6 +272,19 @@ class _KinesisHomeState extends State<KinesisHome> {
               icon: const Icon(Icons.photo_library_outlined),
               tooltip: 'Library',
             ),
+            if (_items.isNotEmpty)
+              IconButton(
+                onPressed: () => setState(() {
+                  _gridMode = !_gridMode;
+                  _selectedItems.clear();
+                }),
+                icon: Icon(
+                  _gridMode
+                      ? Icons.fullscreen_outlined
+                      : Icons.grid_view_outlined,
+                ),
+                tooltip: _gridMode ? 'Single image review' : 'Grid review',
+              ),
             TextButton.icon(
               onPressed: _chooseLibrary,
               icon: const Icon(Icons.folder_outlined),
@@ -269,7 +292,9 @@ class _KinesisHomeState extends State<KinesisHome> {
             ),
           ],
         ),
-        body: _items.isEmpty ? _welcome() : _review(),
+        body: _items.isEmpty
+            ? _welcome()
+            : (_gridMode ? _reviewGrid() : _review()),
         floatingActionButton: _items.isEmpty
             ? null
             : FloatingActionButton.extended(
@@ -384,6 +409,141 @@ class _KinesisHomeState extends State<KinesisHome> {
       ),
     );
   }
+
+  Widget _reviewGrid() => Column(
+    children: [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(24, 16, 24, 8),
+        child: Row(
+          children: [
+            Text(
+              '${_selectedItems.length} selected',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const Spacer(),
+            TextButton(
+              onPressed: () => setState(
+                () => _selectedItems.addAll(
+                  List.generate(_items.length, (index) => index),
+                ),
+              ),
+              child: const Text('Select all'),
+            ),
+            TextButton(
+              onPressed: () => setState(_selectedItems.clear),
+              child: const Text('Clear'),
+            ),
+          ],
+        ),
+      ),
+      Expanded(
+        child: GridView.builder(
+          padding: const EdgeInsets.all(16),
+          gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+            maxCrossAxisExtent: 180,
+            mainAxisSpacing: 12,
+            crossAxisSpacing: 12,
+          ),
+          itemCount: _items.length,
+          itemBuilder: (_, index) => _gridTile(index),
+        ),
+      ),
+      if (_selectedItems.isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.all(16),
+          child: Wrap(
+            alignment: WrapAlignment.center,
+            spacing: 12,
+            children: [
+              _action(
+                _shortcuts[ReviewDecision.keepBoth]!,
+                'Keep both',
+                ReviewDecision.keepBoth,
+              ),
+              _action(
+                _shortcuts[ReviewDecision.keepJpeg]!,
+                'Keep JPEG',
+                ReviewDecision.keepJpeg,
+              ),
+              _action(
+                _shortcuts[ReviewDecision.keepCr3]!,
+                'Keep CR3',
+                ReviewDecision.keepCr3,
+              ),
+              _action(
+                _shortcuts[ReviewDecision.deleteBoth]!,
+                'Delete both',
+                ReviewDecision.deleteBoth,
+              ),
+            ],
+          ),
+        ),
+    ],
+  );
+
+  Widget _gridTile(int index) {
+    final item = _items[index];
+    final preview =
+        item.jpeg ??
+        (item.single?.kind == MediaKind.image ? item.single : null);
+    final selected = _selectedItems.contains(index);
+    final decision = _decisions[index];
+    return InkWell(
+      onTap: () => setState(
+        () =>
+            selected ? _selectedItems.remove(index) : _selectedItems.add(index),
+      ),
+      onDoubleTap: () => setState(() {
+        _current = index;
+        _gridMode = false;
+        _selectedItems.clear();
+      }),
+      child: Card(
+        color: selected ? Theme.of(context).colorScheme.primaryContainer : null,
+        clipBehavior: Clip.antiAlias,
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: preview == null
+                  ? const Center(child: Icon(Icons.perm_media_outlined))
+                  : Image.file(
+                      File(preview.path),
+                      fit: BoxFit.cover,
+                      cacheWidth: 360,
+                      errorBuilder: (_, _, _) => const Center(
+                        child: Icon(Icons.broken_image_outlined),
+                      ),
+                    ),
+            ),
+            Positioned(
+              top: 6,
+              right: 6,
+              child: CircleAvatar(
+                radius: 13,
+                child: Icon(
+                  selected ? Icons.check : Icons.circle_outlined,
+                  size: 18,
+                ),
+              ),
+            ),
+            if (decision != null)
+              Positioned(
+                left: 6,
+                bottom: 6,
+                child: Chip(label: Text(_decisionLabel(decision))),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _decisionLabel(ReviewDecision decision) => switch (decision) {
+    ReviewDecision.keepBoth => 'Both',
+    ReviewDecision.keepJpeg => 'JPEG',
+    ReviewDecision.keepCr3 => 'CR3',
+    ReviewDecision.deleteBoth => 'Delete',
+  };
 
   Widget _action(String key, String label, ReviewDecision decision) =>
       FilledButton.tonal(

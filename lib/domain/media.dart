@@ -5,17 +5,30 @@ enum MediaKind { jpeg, cr3, image, video }
 enum ReviewDecision { keepBoth, keepJpeg, keepCr3, deleteBoth }
 
 class MediaFile {
-  const MediaFile({required this.path, required this.kind, this.hash});
+  const MediaFile({
+    required this.path,
+    required this.kind,
+    this.hash,
+    this.alreadyExists = false,
+  });
 
   final String path;
   final MediaKind kind;
   final String? hash;
+  final bool alreadyExists;
 
   String get name => File(path).uri.pathSegments.last;
   String get stem => name.substring(0, name.lastIndexOf('.')).toLowerCase();
 
-  MediaFile withHash(String value) =>
-      MediaFile(path: path, kind: kind, hash: value);
+  MediaFile withHash(String value) => MediaFile(
+    path: path,
+    kind: kind,
+    hash: value,
+    alreadyExists: alreadyExists,
+  );
+
+  MediaFile withExistingStatus(bool value) =>
+      MediaFile(path: path, kind: kind, hash: hash, alreadyExists: value);
 }
 
 class ReviewItem {

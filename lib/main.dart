@@ -44,6 +44,9 @@ class _KinesisHomeState extends State<KinesisHome> {
   List<ImportedAsset> _libraryAssets = [];
   String? _library;
   String _template = '{year}/{year}-{month}-{day}';
+  bool _splitRawAndJpeg = false;
+  String _jpegTemplate = 'JPEG/{year}/{year}-{month}-{day}';
+  String _cr3Template = 'CRAW/{year}/{year}-{month}-{day}';
   Map<ReviewDecision, String> _shortcuts = {
     ReviewDecision.keepBoth: 'A',
     ReviewDecision.keepJpeg: 'S',
@@ -75,6 +78,9 @@ class _KinesisHomeState extends State<KinesisHome> {
       _store = store;
       _library = state['library'] as String?;
       _template = state['template'] as String? ?? _template;
+      _splitRawAndJpeg = state['splitRawAndJpeg'] as bool? ?? false;
+      _jpegTemplate = state['jpegTemplate'] as String? ?? _jpegTemplate;
+      _cr3Template = state['cr3Template'] as String? ?? _cr3Template;
       final savedShortcuts = state['shortcuts'] as Map<String, dynamic>?;
       if (savedShortcuts != null) {
         _shortcuts = {
@@ -91,6 +97,20 @@ class _KinesisHomeState extends State<KinesisHome> {
           .map((asset) => ImportedAsset.fromJson(asset as Map<String, dynamic>))
           .toList();
     });
+    await _refreshLibraryIndex();
+  }
+
+  Future<void> _refreshLibraryIndex() async {
+    final library = _library;
+    if (library == null) return;
+    try {
+      final hashes = await _media.loadLibraryHashes(library);
+      if (!mounted) return;
+      setState(() => _existingHashes.addAll(hashes));
+      await _saveSettings();
+    } on FileSystemException {
+      // Library access can be unavailable when a removable volume is absent.
+    }
   }
 
   Future<void> _saveSettings() =>
@@ -99,6 +119,9 @@ class _KinesisHomeState extends State<KinesisHome> {
         'hashes': _existingHashes.toList(),
         'assets': _libraryAssets.map((asset) => asset.toJson()).toList(),
         'template': _template,
+        'splitRawAndJpeg': _splitRawAndJpeg,
+        'jpegTemplate': _jpegTemplate,
+        'cr3Template': _cr3Template,
         'shortcuts': {
           for (final entry in _shortcuts.entries) entry.key.name: entry.value,
         },
@@ -122,13 +145,28 @@ class _KinesisHomeState extends State<KinesisHome> {
     setState(() => _scanning = true);
     try {
       final scanned = await _media.scan(selected);
+      final sourceSizes = <int>{};
+      for (final file in scanned.expand((item) => item.files)) {
+        sourceSizes.add((await File(file.path).stat()).size);
+      }
+      final libraryHashes = _library == null
+          ? <String>{}
+          : await _media.loadLibraryHashes(
+              _library!,
+              candidateSizes: sourceSizes,
+            );
+      final marked = await _media.markExisting(scanned, {
+        ..._existingHashes,
+        ...libraryHashes,
+      });
       if (mounted) {
         setState(() {
-          _items = scanned;
+          _items = marked;
           _decisions.clear();
           _selectedItems.clear();
           _current = 0;
           _gridMode = false;
+          _existingHashes.addAll(libraryHashes);
         });
       }
     } on FileSystemException catch (error) {
@@ -211,12 +249,17 @@ class _KinesisHomeState extends State<KinesisHome> {
           await _media.copyAndVerify(
             file.withHash(sourceHash),
             _library!,
-            _template,
+            _templateFor(file),
           ),
         );
       }
       _existingHashes.addAll(importedAssets.map((asset) => asset.hash));
       _libraryAssets.addAll(importedAssets);
+      final libraryHashes = await _media.loadLibraryHashes(_library!);
+      await _media.writeLibraryHashes(_library!, {
+        ...libraryHashes,
+        ...importedAssets.map((asset) => asset.hash),
+      });
       await _saveSettings();
       for (final file in plan.toDelete) {
         if (await File(file.path).exists()) {
@@ -247,6 +290,15 @@ class _KinesisHomeState extends State<KinesisHome> {
         );
       }
     }
+  }
+
+  String _templateFor(MediaFile file) {
+    if (!_splitRawAndJpeg) return _template;
+    return switch (file.kind) {
+      MediaKind.jpeg => _jpegTemplate,
+      MediaKind.cr3 => _cr3Template,
+      _ => _template,
+    };
   }
 
   @override
@@ -340,40 +392,39 @@ class _KinesisHomeState extends State<KinesisHome> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(
-            '${_current + 1} of ${_items.length}',
-            style: Theme.of(context).textTheme.labelLarge,
-          ),
+          Text('${_current + 1} of ${_items.length}'),
           const SizedBox(height: 16),
           Expanded(
-            child: Card(
-              child: Center(
-                child: preview == null
-                    ? Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(Icons.perm_media_outlined, size: 96),
-                          const SizedBox(height: 16),
-                          Text(
-                            item.label,
-                            style: Theme.of(context).textTheme.titleLarge,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                Card(
+                  child: Center(
+                    child: preview == null
+                        ? Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.perm_media_outlined, size: 96),
+                              const SizedBox(height: 16),
+                              Text(item.label),
+                              Text(
+                                item.isPair
+                                    ? 'JPEG + CR3 pair'
+                                    : 'Preview unavailable',
+                              ),
+                            ],
+                          )
+                        : Image.file(
+                            File(preview.path),
+                            fit: BoxFit.contain,
+                            cacheWidth: 1600,
+                            errorBuilder: (_, _, _) => Text(item.label),
                           ),
-                          Text(
-                            item.isPair
-                                ? 'JPEG + CR3 pair'
-                                : 'Preview unavailable',
-                          ),
-                        ],
-                      )
-                    : Image.file(
-                        File(preview.path),
-                        fit: BoxFit.contain,
-                        // Camera JPEGs are commonly 6000px wide. Decode only
-                        // enough pixels for a desktop review surface.
-                        cacheWidth: 1600,
-                        errorBuilder: (_, _, _) => Text(item.label),
-                      ),
-              ),
+                  ),
+                ),
+                if (item.files.any((file) => file.alreadyExists))
+                  Positioned.fill(child: _alreadyExistsOverlay()),
+              ],
             ),
           ),
           const SizedBox(height: 16),
@@ -410,6 +461,19 @@ class _KinesisHomeState extends State<KinesisHome> {
     );
   }
 
+  Widget _alreadyExistsOverlay() => ColoredBox(
+    color: Colors.white60,
+    child: Center(
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        color: Colors.black54,
+        child: const Text(
+          'Already exists',
+          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+        ),
+      ),
+    ),
+  );
   Widget _reviewGrid() => Column(
     children: [
       Padding(
@@ -488,6 +552,7 @@ class _KinesisHomeState extends State<KinesisHome> {
         (item.single?.kind == MediaKind.image ? item.single : null);
     final selected = _selectedItems.contains(index);
     final decision = _decisions[index];
+    final alreadyExists = item.files.any((file) => file.alreadyExists);
     return InkWell(
       onTap: () => setState(
         () =>
@@ -532,6 +597,7 @@ class _KinesisHomeState extends State<KinesisHome> {
                 bottom: 6,
                 child: Chip(label: Text(_decisionLabel(decision))),
               ),
+            if (alreadyExists) Positioned.fill(child: _alreadyExistsOverlay()),
           ],
         ),
       ),
@@ -553,6 +619,9 @@ class _KinesisHomeState extends State<KinesisHome> {
 
   Future<void> _showSettings() async {
     final controller = TextEditingController(text: _template);
+    var splitRawAndJpeg = _splitRawAndJpeg;
+    final jpegController = TextEditingController(text: _jpegTemplate);
+    final cr3Controller = TextEditingController(text: _cr3Template);
     final keys = {
       for (final entry in _shortcuts.entries)
         entry.key: TextEditingController(text: entry.value),
@@ -572,6 +641,35 @@ class _KinesisHomeState extends State<KinesisHome> {
                   labelText: 'Destination template',
                   helperText:
                       'Tokens: {year}, {month}, {day}, {originalName}, {sourceFolder}',
+                ),
+              ),
+              StatefulBuilder(
+                builder: (context, setDialogState) => Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    CheckboxListTile(
+                      contentPadding: EdgeInsets.zero,
+                      value: splitRawAndJpeg,
+                      title: const Text('Use separate JPEG and CRAW folders'),
+                      onChanged: (value) => setDialogState(
+                        () => splitRawAndJpeg = value ?? false,
+                      ),
+                    ),
+                    if (splitRawAndJpeg) ...[
+                      TextField(
+                        controller: jpegController,
+                        decoration: const InputDecoration(
+                          labelText: 'JPEG destination template',
+                        ),
+                      ),
+                      TextField(
+                        controller: cr3Controller,
+                        decoration: const InputDecoration(
+                          labelText: 'CRAW destination template',
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
               ),
               for (final decision in ReviewDecision.values)
@@ -607,9 +705,18 @@ class _KinesisHomeState extends State<KinesisHome> {
         ],
       ),
     );
-    if (saved != true || controller.text.trim().isEmpty) return;
+    if (saved != true ||
+        controller.text.trim().isEmpty ||
+        (splitRawAndJpeg &&
+            (jpegController.text.trim().isEmpty ||
+                cr3Controller.text.trim().isEmpty))) {
+      return;
+    }
     setState(() {
       _template = controller.text.trim();
+      _splitRawAndJpeg = splitRawAndJpeg;
+      _jpegTemplate = jpegController.text.trim();
+      _cr3Template = cr3Controller.text.trim();
       _shortcuts = {
         for (final decision in ReviewDecision.values)
           decision: keys[decision]!.text.trim().toUpperCase(),

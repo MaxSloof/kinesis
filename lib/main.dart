@@ -9,6 +9,7 @@ import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 
 import 'domain/media.dart';
+import 'domain/selection.dart';
 import 'domain/view_options.dart';
 import 'services/media_service.dart';
 import 'shortcuts.dart';
@@ -73,7 +74,7 @@ class _KinesisHomeState extends State<KinesisHome> {
   bool _refreshingSource = false;
   bool _sourceRefreshPending = false;
   bool _ingesting = false;
-  final _selectedItems = <int>{};
+  final _selection = MediaSelection();
 
   @override
   void initState() {
@@ -113,6 +114,7 @@ class _KinesisHomeState extends State<KinesisHome> {
         : <String>{};
     setState(() {
       _sortOrder = order;
+      _selection.resetAnchor();
       final ordered = _displayOrder;
       final matching = ordered.indexWhere(
         (index) =>
@@ -282,7 +284,7 @@ class _KinesisHomeState extends State<KinesisHome> {
           _autoDecisions
             ..clear()
             ..addAll(_decisions.keys);
-          _selectedItems.clear();
+          _selection.clear();
           _current = 0;
           _gridMode = false;
           _existingHashes.addAll(
@@ -383,7 +385,7 @@ class _KinesisHomeState extends State<KinesisHome> {
         }
       }
       final selectedPaths = <String>{
-        for (final index in _selectedItems)
+        for (final index in _selection.indices)
           if (index < _items.length)
             for (final file in _items[index].files) file.path,
       };
@@ -426,15 +428,13 @@ class _KinesisHomeState extends State<KinesisHome> {
         _autoDecisions
           ..clear()
           ..addAll(preservedAuto);
-        _selectedItems
-          ..clear()
-          ..addAll([
-            for (var index = 0; index < refreshed.length; index++)
-              if (refreshed[index].files.any(
-                (file) => selectedPaths.contains(file.path),
-              ))
-                index,
-          ]);
+        _selection.replaceWith([
+          for (var index = 0; index < refreshed.length; index++)
+            if (refreshed[index].files.any(
+              (file) => selectedPaths.contains(file.path),
+            ))
+              index,
+        ]);
         final refreshedOrder = MediaViewOrder.sortReviewItemIndices(
           refreshed,
           _sortOrder,
@@ -464,8 +464,8 @@ class _KinesisHomeState extends State<KinesisHome> {
   void _decide(ReviewDecision decision) {
     if (_items.isEmpty) return;
     setState(() {
-      if (_gridMode && _selectedItems.isNotEmpty) {
-        for (final index in _selectedItems) {
+      if (_gridMode && _selection.isNotEmpty) {
+        for (final index in _selection.indices) {
           _decisions[index] = decision;
           _autoDecisions.remove(index);
         }
@@ -727,7 +727,7 @@ class _KinesisHomeState extends State<KinesisHome> {
               IconButton(
                 onPressed: () => setState(() {
                   _gridMode = !_gridMode;
-                  _selectedItems.clear();
+                  _selection.clear();
                 }),
                 icon: Icon(
                   _gridMode
@@ -1048,17 +1048,24 @@ class _KinesisHomeState extends State<KinesisHome> {
           child: Row(
             children: [
               Text(
-                '${_selectedItems.length} selected',
+                '${_selection.length} selected',
                 style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const SizedBox(width: 6),
+              Tooltip(
+                message:
+                    'Shift-click a tile to select every image between it and '
+                    'the last clicked tile.',
+                child: const Icon(Icons.info_outline, size: 16),
               ),
               const Spacer(),
               TextButton(
                 onPressed: () =>
-                    setState(() => _selectedItems.addAll(visibleOrder)),
+                    setState(() => _selection.selectAll(visibleOrder)),
                 child: const Text('Select all'),
               ),
               TextButton(
-                onPressed: () => setState(_selectedItems.clear),
+                onPressed: () => setState(_selection.clear),
                 child: const Text('Clear'),
               ),
             ],
@@ -1071,10 +1078,24 @@ class _KinesisHomeState extends State<KinesisHome> {
                 if (_groupByDate)
                   SliverToBoxAdapter(
                     child: Padding(
-                      padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
-                      child: Text(
-                        group.label,
-                        style: Theme.of(context).textTheme.titleMedium,
+                      padding: const EdgeInsets.fromLTRB(20, 8, 20, 4),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              group.label,
+                              style: Theme.of(context).textTheme.titleMedium,
+                            ),
+                          ),
+                          TextButton(
+                            onPressed: () => _toggleGroupSelection(group.items),
+                            child: Text(
+                              _selection.containsAll(group.items)
+                                  ? 'Clear day'
+                                  : 'Select day',
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ),
@@ -1097,7 +1118,7 @@ class _KinesisHomeState extends State<KinesisHome> {
             ],
           ),
         ),
-        if (_selectedItems.isNotEmpty)
+        if (_selection.isNotEmpty)
           Padding(
             padding: const EdgeInsets.all(16),
             child: Wrap(
@@ -1131,22 +1152,32 @@ class _KinesisHomeState extends State<KinesisHome> {
     );
   }
 
+  void _toggleGroupSelection(Iterable<int> indices) {
+    setState(() => _selection.toggleAll(indices));
+  }
+
+  void _toggleGridSelection(int logicalIndex) {
+    setState(() {
+      _selection.tap(
+        logicalIndex,
+        displayOrder: _displayOrder,
+        extend: HardwareKeyboard.instance.isShiftPressed,
+      );
+    });
+  }
+
   Widget _gridTile(int logicalIndex) {
     final item = _items[logicalIndex];
     final preview = _previewFor(item);
-    final selected = _selectedItems.contains(logicalIndex);
+    final selected = _selection.contains(logicalIndex);
     final decision = _decisions[logicalIndex];
     final isDuplicate = item.isDuplicate;
     return InkWell(
-      onTap: () => setState(
-        () => selected
-            ? _selectedItems.remove(logicalIndex)
-            : _selectedItems.add(logicalIndex),
-      ),
+      onTap: () => _toggleGridSelection(logicalIndex),
       onDoubleTap: () => setState(() {
         _current = _displayOrder.indexOf(logicalIndex);
         _gridMode = false;
-        _selectedItems.clear();
+        _selection.clear();
       }),
       child: Card(
         color: selected ? Theme.of(context).colorScheme.primaryContainer : null,

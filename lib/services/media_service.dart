@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
+import 'package:exif/exif.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as path;
@@ -23,6 +24,54 @@ class MediaService {
     '.mov': MediaKind.video,
   };
 
+  Future<DateTime?> _readCaptureDate(File file, MediaKind kind) async {
+    if (kind == MediaKind.cr3 || kind == MediaKind.video) return null;
+    try {
+      final tags = await readExifFromFile(file);
+      for (final name in const [
+        'EXIF DateTimeOriginal',
+        'EXIF DateTimeDigitized',
+        'Image DateTime',
+      ]) {
+        final value = tags[name]?.printable;
+        final parsed = value == null ? null : _parseExifDate(value);
+        if (parsed != null) return parsed;
+      }
+    } on Object catch (error) {
+      debugPrint(
+        '[metadata] could not read capture date for ${file.path}: $error',
+      );
+    }
+    return null;
+  }
+
+  DateTime? _parseExifDate(String value) {
+    final match = RegExp(
+      r'^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})',
+    ).firstMatch(value.trim());
+    if (match == null) return null;
+    final parts = [
+      for (var index = 1; index <= 6; index++) int.parse(match[index]!),
+    ];
+    final date = DateTime(
+      parts[0],
+      parts[1],
+      parts[2],
+      parts[3],
+      parts[4],
+      parts[5],
+    );
+    if (date.year != parts[0] ||
+        date.month != parts[1] ||
+        date.day != parts[2] ||
+        date.hour != parts[3] ||
+        date.minute != parts[4] ||
+        date.second != parts[5]) {
+      return null;
+    }
+    return date;
+  }
+
   Future<List<ReviewItem>> scan(
     String source, {
     Set<String> existingHashes = const {},
@@ -38,7 +87,13 @@ class MediaService {
       if (_inTrashFolder(entity.path)) continue;
       final kind = _extensions[path.extension(entity.path).toLowerCase()];
       if (kind != null) {
-        final file = MediaFile(path: entity.path, kind: kind);
+        final stat = await entity.stat();
+        final file = MediaFile(
+          path: entity.path,
+          kind: kind,
+          sizeBytes: stat.size,
+          captureDate: await _readCaptureDate(entity, kind),
+        );
         files.add(
           existingHashes.isEmpty
               ? file
@@ -453,6 +508,11 @@ class MediaService {
         MediaFile(
           path: file.absolutePath,
           kind: _extensions[path.extension(file.path).toLowerCase()]!,
+          sizeBytes: file.size,
+          captureDate: await _readCaptureDate(
+            File(file.absolutePath),
+            _extensions[path.extension(file.path).toLowerCase()]!,
+          ),
         ),
     ];
   }

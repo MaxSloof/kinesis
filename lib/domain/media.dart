@@ -10,12 +10,16 @@ class MediaFile {
     required this.kind,
     this.hash,
     this.alreadyExists = false,
+    this.sizeBytes,
+    this.captureDate,
   });
 
   final String path;
   final MediaKind kind;
   final String? hash;
   final bool alreadyExists;
+  final int? sizeBytes;
+  final DateTime? captureDate;
 
   String get name => File(path).uri.pathSegments.last;
   String get stem => name.substring(0, name.lastIndexOf('.')).toLowerCase();
@@ -25,10 +29,18 @@ class MediaFile {
     kind: kind,
     hash: value,
     alreadyExists: alreadyExists,
+    sizeBytes: sizeBytes,
+    captureDate: captureDate,
   );
 
-  MediaFile withExistingStatus(bool value) =>
-      MediaFile(path: path, kind: kind, hash: hash, alreadyExists: value);
+  MediaFile withExistingStatus(bool value) => MediaFile(
+    path: path,
+    kind: kind,
+    hash: hash,
+    alreadyExists: value,
+    sizeBytes: sizeBytes,
+    captureDate: captureDate,
+  );
 }
 
 class ReviewItem {
@@ -42,6 +54,13 @@ class ReviewItem {
   List<MediaFile> get files =>
       [jpeg, cr3, single].whereType<MediaFile>().toList();
   String get label => files.map((file) => file.name).join(' + ');
+  DateTime? get captureDate =>
+      jpeg?.captureDate ?? cr3?.captureDate ?? single?.captureDate;
+  int? get sizeBytes {
+    final media = files;
+    if (media.any((file) => file.sizeBytes == null)) return null;
+    return media.fold<int>(0, (total, file) => total + file.sizeBytes!);
+  }
 }
 
 class ImportPlan {

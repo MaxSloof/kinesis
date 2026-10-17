@@ -9,6 +9,7 @@ import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 
 import 'domain/media.dart';
+import 'domain/view_options.dart';
 import 'services/media_service.dart';
 import 'shortcuts.dart';
 
@@ -58,6 +59,8 @@ class _KinesisHomeState extends State<KinesisHome> {
   int _current = 0;
   bool _scanning = false;
   bool _gridMode = false;
+  MediaSortOrder _sortOrder = MediaSortOrder.nameAscending;
+  bool _groupByDate = true;
   String? _source;
   StreamSubscription<FileSystemEvent>? _sourceWatch;
   Timer? _sourceRefreshTimer;
@@ -78,6 +81,27 @@ class _KinesisHomeState extends State<KinesisHome> {
     _sourceWatch?.cancel();
     super.dispose();
   }
+
+  List<int> get _displayOrder =>
+      MediaViewOrder.sortReviewItemIndices(_items, _sortOrder);
+
+  void _changeSortOrder(MediaSortOrder order) {
+    if (order == _sortOrder) return;
+    final currentPaths = _items.isNotEmpty && _current < _items.length
+        ? _items[_displayOrder[_current]].files.map((file) => file.path).toSet()
+        : <String>{};
+    setState(() {
+      _sortOrder = order;
+      final ordered = _displayOrder;
+      final matching = ordered.indexWhere(
+        (index) =>
+            _items[index].files.any((file) => currentPaths.contains(file.path)),
+      );
+      if (matching >= 0) _current = matching;
+    });
+  }
+
+  void _toggleDateGrouping() => setState(() => _groupByDate = !_groupByDate);
 
   Future<void> _loadSettings() async {
     final support = await getApplicationSupportDirectory();
@@ -320,8 +344,11 @@ class _KinesisHomeState extends State<KinesisHome> {
           if (index < _items.length)
             for (final file in _items[index].files) file.path,
       };
-      final currentPaths = _current < _items.length
-          ? _items[_current].files.map((file) => file.path).toSet()
+      final visibleOrder = _displayOrder;
+      final currentPaths = _current < visibleOrder.length
+          ? _items[visibleOrder[_current]].files
+                .map((file) => file.path)
+                .toSet()
           : <String>{};
       setState(() {
         _items = refreshed;
@@ -345,8 +372,14 @@ class _KinesisHomeState extends State<KinesisHome> {
               ))
                 index,
           ]);
-        final matchingCurrent = refreshed.indexWhere(
-          (item) => item.files.any((file) => currentPaths.contains(file.path)),
+        final refreshedOrder = MediaViewOrder.sortReviewItemIndices(
+          refreshed,
+          _sortOrder,
+        );
+        final matchingCurrent = refreshedOrder.indexWhere(
+          (index) => refreshed[index].files.any(
+            (file) => currentPaths.contains(file.path),
+          ),
         );
         _current = refreshed.isEmpty
             ? 0
@@ -374,8 +407,10 @@ class _KinesisHomeState extends State<KinesisHome> {
         }
         return;
       }
-      _decisions[_current] = decision;
-      if (_current < _items.length - 1) _current++;
+      final visibleOrder = _displayOrder;
+      if (_current >= visibleOrder.length) return;
+      _decisions[visibleOrder[_current]] = decision;
+      if (_current < visibleOrder.length - 1) _current++;
     });
   }
 
@@ -605,7 +640,7 @@ class _KinesisHomeState extends State<KinesisHome> {
               icon: const Icon(Icons.photo_library_outlined),
               tooltip: 'Library',
             ),
-            if (_items.isNotEmpty)
+            if (_items.isNotEmpty) ...[
               IconButton(
                 onPressed: () => setState(() {
                   _gridMode = !_gridMode;
@@ -618,6 +653,47 @@ class _KinesisHomeState extends State<KinesisHome> {
                 ),
                 tooltip: _gridMode ? 'Single image review' : 'Grid review',
               ),
+              PopupMenuButton<MediaSortOrder>(
+                tooltip: 'Sort ingest review',
+                icon: const Icon(Icons.sort),
+                onSelected: _changeSortOrder,
+                itemBuilder: (context) => const [
+                  PopupMenuItem(
+                    value: MediaSortOrder.nameAscending,
+                    child: Text('Name (A–Z)'),
+                  ),
+                  PopupMenuItem(
+                    value: MediaSortOrder.nameDescending,
+                    child: Text('Name (Z–A)'),
+                  ),
+                  PopupMenuItem(
+                    value: MediaSortOrder.captureNewest,
+                    child: Text('Capture date (newest)'),
+                  ),
+                  PopupMenuItem(
+                    value: MediaSortOrder.captureOldest,
+                    child: Text('Capture date (oldest)'),
+                  ),
+                  PopupMenuItem(
+                    value: MediaSortOrder.sizeLargest,
+                    child: Text('File size (largest)'),
+                  ),
+                  PopupMenuItem(
+                    value: MediaSortOrder.sizeSmallest,
+                    child: Text('File size (smallest)'),
+                  ),
+                ],
+              ),
+              IconButton(
+                onPressed: _toggleDateGrouping,
+                icon: Icon(
+                  _groupByDate
+                      ? Icons.calendar_month
+                      : Icons.calendar_month_outlined,
+                ),
+                tooltip: _groupByDate ? 'Ungroup dates' : 'Group by date',
+              ),
+            ],
             TextButton.icon(
               onPressed: _chooseLibrary,
               icon: const Icon(Icons.folder_outlined),
@@ -670,7 +746,8 @@ class _KinesisHomeState extends State<KinesisHome> {
   );
 
   Widget _review() {
-    final item = _items[_current];
+    final visibleOrder = _displayOrder;
+    final item = _items[visibleOrder[_current]];
     final preview = _previewFor(item);
     return Padding(
       padding: const EdgeInsets.all(32),
@@ -716,6 +793,12 @@ class _KinesisHomeState extends State<KinesisHome> {
           _previewStrip(),
           const SizedBox(height: 12),
           Text(item.label, textAlign: TextAlign.center),
+          const SizedBox(height: 4),
+          Text(
+            '${MediaViewOrder.captureDateLabel(item.captureDate)}  ·  '
+            '${MediaViewOrder.sizeLabel(item.sizeBytes)}',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
           const SizedBox(height: 12),
           Wrap(
             alignment: WrapAlignment.center,
@@ -759,8 +842,9 @@ class _KinesisHomeState extends State<KinesisHome> {
       item.jpeg ?? (item.single?.kind == MediaKind.image ? item.single : null);
 
   Widget _previewStrip() {
-    final first = (_current - 3).clamp(0, _items.length - 1).toInt();
-    final last = (_current + 3).clamp(0, _items.length - 1).toInt();
+    final visibleOrder = _displayOrder;
+    final first = (_current - 3).clamp(0, visibleOrder.length - 1).toInt();
+    final last = (_current + 3).clamp(0, visibleOrder.length - 1).toInt();
     return SizedBox(
       height: 76,
       child: ListView.separated(
@@ -769,7 +853,7 @@ class _KinesisHomeState extends State<KinesisHome> {
         separatorBuilder: (_, _) => const SizedBox(width: 8),
         itemBuilder: (_, stripIndex) {
           final index = first + stripIndex;
-          final item = _items[index];
+          final item = _items[visibleOrder[index]];
           final preview = _previewFor(item);
           return Semantics(
             button: true,
@@ -821,90 +905,118 @@ class _KinesisHomeState extends State<KinesisHome> {
       ),
     ),
   );
-  Widget _reviewGrid() => Column(
-    children: [
-      Padding(
-        padding: const EdgeInsets.fromLTRB(24, 16, 24, 8),
-        child: Row(
-          children: [
-            Text(
-              '${_selectedItems.length} selected',
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-            const Spacer(),
-            TextButton(
-              onPressed: () => setState(
-                () => _selectedItems.addAll(
-                  List.generate(_items.length, (index) => index),
-                ),
-              ),
-              child: const Text('Select all'),
-            ),
-            TextButton(
-              onPressed: () => setState(_selectedItems.clear),
-              child: const Text('Clear'),
-            ),
-          ],
-        ),
-      ),
-      Expanded(
-        child: GridView.builder(
-          padding: const EdgeInsets.all(16),
-          gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-            maxCrossAxisExtent: 180,
-            mainAxisSpacing: 12,
-            crossAxisSpacing: 12,
-          ),
-          itemCount: _items.length,
-          itemBuilder: (_, index) => _gridTile(index),
-        ),
-      ),
-      if (_selectedItems.isNotEmpty)
+  Widget _reviewGrid() {
+    final visibleOrder = _displayOrder;
+    final groups = _groupByDate
+        ? MediaViewOrder.groupByCaptureDate<int>(
+            visibleOrder,
+            (index) => _items[index].captureDate,
+          )
+        : [MediaDateGroup(label: '', items: visibleOrder)];
+    return Column(
+      children: [
         Padding(
-          padding: const EdgeInsets.all(16),
-          child: Wrap(
-            alignment: WrapAlignment.center,
-            spacing: 12,
+          padding: const EdgeInsets.fromLTRB(24, 16, 24, 8),
+          child: Row(
             children: [
-              _action(
-                _shortcuts[ReviewDecision.keepBoth]!,
-                'Keep both',
-                ReviewDecision.keepBoth,
+              Text(
+                '${_selectedItems.length} selected',
+                style: Theme.of(context).textTheme.titleMedium,
               ),
-              _action(
-                _shortcuts[ReviewDecision.keepJpeg]!,
-                'Keep JPEG',
-                ReviewDecision.keepJpeg,
+              const Spacer(),
+              TextButton(
+                onPressed: () =>
+                    setState(() => _selectedItems.addAll(visibleOrder)),
+                child: const Text('Select all'),
               ),
-              _action(
-                _shortcuts[ReviewDecision.keepCr3]!,
-                'Keep CR3',
-                ReviewDecision.keepCr3,
-              ),
-              _action(
-                _shortcuts[ReviewDecision.deleteBoth]!,
-                'Delete both',
-                ReviewDecision.deleteBoth,
+              TextButton(
+                onPressed: () => setState(_selectedItems.clear),
+                child: const Text('Clear'),
               ),
             ],
           ),
         ),
-    ],
-  );
+        Expanded(
+          child: CustomScrollView(
+            slivers: [
+              for (final group in groups) ...[
+                if (_groupByDate)
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
+                      child: Text(
+                        group.label,
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                    ),
+                  ),
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                  sliver: SliverGrid(
+                    gridDelegate:
+                        const SliverGridDelegateWithMaxCrossAxisExtent(
+                          maxCrossAxisExtent: 180,
+                          mainAxisSpacing: 12,
+                          crossAxisSpacing: 12,
+                        ),
+                    delegate: SliverChildBuilderDelegate(
+                      (_, index) => _gridTile(group.items[index]),
+                      childCount: group.items.length,
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+        if (_selectedItems.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 12,
+              children: [
+                _action(
+                  _shortcuts[ReviewDecision.keepBoth]!,
+                  'Keep both',
+                  ReviewDecision.keepBoth,
+                ),
+                _action(
+                  _shortcuts[ReviewDecision.keepJpeg]!,
+                  'Keep JPEG',
+                  ReviewDecision.keepJpeg,
+                ),
+                _action(
+                  _shortcuts[ReviewDecision.keepCr3]!,
+                  'Keep CR3',
+                  ReviewDecision.keepCr3,
+                ),
+                _action(
+                  _shortcuts[ReviewDecision.deleteBoth]!,
+                  'Delete both',
+                  ReviewDecision.deleteBoth,
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
 
-  Widget _gridTile(int index) {
-    final item = _items[index];
+  Widget _gridTile(int logicalIndex) {
+    final item = _items[logicalIndex];
     final preview = _previewFor(item);
-    final selected = _selectedItems.contains(index);
-    final decision = _decisions[index];
+    final selected = _selectedItems.contains(logicalIndex);
+    final decision = _decisions[logicalIndex];
     final alreadyExists = item.files.any((file) => file.alreadyExists);
     return InkWell(
       onTap: () => setState(
-        () =>
-            selected ? _selectedItems.remove(index) : _selectedItems.add(index),
+        () => selected
+            ? _selectedItems.remove(logicalIndex)
+            : _selectedItems.add(logicalIndex),
       ),
       onDoubleTap: () => setState(() {
-        _current = index;
+        _current = _displayOrder.indexOf(logicalIndex);
         _gridMode = false;
         _selectedItems.clear();
       }),
@@ -936,10 +1048,43 @@ class _KinesisHomeState extends State<KinesisHome> {
                 ),
               ),
             ),
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: ColoredBox(
+                color: Colors.black54,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 5,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        item.label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(color: Colors.white),
+                      ),
+                      Text(
+                        MediaViewOrder.sizeLabel(item.sizeBytes),
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 11,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
             if (decision != null)
               Positioned(
                 left: 6,
-                bottom: 6,
+                top: 6,
                 child: Chip(label: Text(_decisionLabel(decision))),
               ),
             if (alreadyExists) Positioned.fill(child: _alreadyExistsOverlay()),
@@ -1098,6 +1243,8 @@ class LibraryPage extends StatefulWidget {
 
 class _LibraryPageState extends State<LibraryPage> {
   List<MediaFile> _assets = [];
+  MediaSortOrder _sortOrder = MediaSortOrder.nameAscending;
+  bool _groupByDate = true;
   StreamSubscription<FileSystemEvent>? _libraryWatch;
   Timer? _refreshTimer;
   bool _loading = true;
@@ -1118,6 +1265,9 @@ class _LibraryPageState extends State<LibraryPage> {
     _libraryWatch?.cancel();
     super.dispose();
   }
+
+  List<MediaFile> get _orderedAssets =>
+      MediaViewOrder.sortFiles(_assets, _sortOrder);
 
   Future<void> _watchLibrary() async {
     final library = widget.libraryPath;
@@ -1189,74 +1339,160 @@ class _LibraryPageState extends State<LibraryPage> {
 
   @override
   Widget build(BuildContext context) {
+    final assets = _orderedAssets;
     final jpegPreviews = <String, MediaFile>{
-      for (final asset in _assets)
+      for (final asset in assets)
         if (asset.kind == MediaKind.jpeg) _pairKey(asset.path): asset,
     };
+    final groups = _groupByDate
+        ? MediaViewOrder.groupByCaptureDate<MediaFile>(
+            assets,
+            (asset) => asset.captureDate,
+          )
+        : [MediaDateGroup(label: '', items: assets)];
     final cacheWidth = (180 * MediaQuery.devicePixelRatioOf(context)).round();
     return Scaffold(
-      appBar: AppBar(title: const Text('Library')),
+      appBar: AppBar(
+        title: const Text('Library'),
+        actions: [
+          PopupMenuButton<MediaSortOrder>(
+            tooltip: 'Sort library',
+            icon: const Icon(Icons.sort),
+            onSelected: (order) => setState(() => _sortOrder = order),
+            itemBuilder: (context) => const [
+              PopupMenuItem(
+                value: MediaSortOrder.nameAscending,
+                child: Text('Name (A–Z)'),
+              ),
+              PopupMenuItem(
+                value: MediaSortOrder.nameDescending,
+                child: Text('Name (Z–A)'),
+              ),
+              PopupMenuItem(
+                value: MediaSortOrder.captureNewest,
+                child: Text('Capture date (newest)'),
+              ),
+              PopupMenuItem(
+                value: MediaSortOrder.captureOldest,
+                child: Text('Capture date (oldest)'),
+              ),
+              PopupMenuItem(
+                value: MediaSortOrder.sizeLargest,
+                child: Text('File size (largest)'),
+              ),
+              PopupMenuItem(
+                value: MediaSortOrder.sizeSmallest,
+                child: Text('File size (smallest)'),
+              ),
+            ],
+          ),
+          IconButton(
+            onPressed: () => setState(() => _groupByDate = !_groupByDate),
+            icon: Icon(
+              _groupByDate
+                  ? Icons.calendar_month
+                  : Icons.calendar_month_outlined,
+            ),
+            tooltip: _groupByDate ? 'Ungroup dates' : 'Group by date',
+          ),
+        ],
+      ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _error != null
           ? Center(child: Text(_error!))
-          : _assets.isEmpty
+          : assets.isEmpty
           ? const Center(child: Text('No media files in this library folder.'))
-          : GridView.builder(
-              padding: const EdgeInsets.all(16),
-              gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-                maxCrossAxisExtent: 180,
-                mainAxisSpacing: 12,
-                crossAxisSpacing: 12,
-              ),
-              itemCount: _assets.length,
-              itemBuilder: (_, index) {
-                final asset = _assets[index];
-                final preview = switch (asset.kind) {
-                  MediaKind.jpeg || MediaKind.image => asset,
-                  MediaKind.cr3 => jpegPreviews[_pairKey(asset.path)],
-                  MediaKind.video => null,
-                };
-                return Card(
-                  clipBehavior: Clip.antiAlias,
-                  child: Column(
-                    children: [
-                      Expanded(
-                        child: preview == null
-                            ? const Center(
-                                child: Icon(
-                                  Icons.perm_media_outlined,
-                                  size: 48,
-                                ),
-                              )
-                            : Image.file(
-                                File(preview.path),
-                                fit: BoxFit.cover,
-                                width: double.infinity,
-                                cacheWidth: cacheWidth,
-                                errorBuilder: (_, error, _) {
-                                  debugPrint(
-                                    '[library] thumbnail failed for '
-                                    '${preview.path}: $error',
-                                  );
-                                  return const Center(
-                                    child: Icon(Icons.broken_image_outlined),
-                                  );
-                                },
-                              ),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.all(8),
+          : CustomScrollView(
+              slivers: [
+                for (final group in groups) ...[
+                  if (_groupByDate)
+                    SliverToBoxAdapter(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
                         child: Text(
-                          path.basename(asset.path),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+                          group.label,
+                          style: Theme.of(context).textTheme.titleMedium,
                         ),
                       ),
-                    ],
+                    ),
+                  SliverPadding(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                    sliver: SliverGrid(
+                      gridDelegate:
+                          const SliverGridDelegateWithMaxCrossAxisExtent(
+                            maxCrossAxisExtent: 180,
+                            mainAxisSpacing: 12,
+                            crossAxisSpacing: 12,
+                          ),
+                      delegate: SliverChildBuilderDelegate((_, index) {
+                        final asset = group.items[index];
+                        final preview = switch (asset.kind) {
+                          MediaKind.jpeg || MediaKind.image => asset,
+                          MediaKind.cr3 => jpegPreviews[_pairKey(asset.path)],
+                          MediaKind.video => null,
+                        };
+                        return Card(
+                          clipBehavior: Clip.antiAlias,
+                          child: Column(
+                            children: [
+                              Expanded(
+                                child: preview == null
+                                    ? const Center(
+                                        child: Icon(
+                                          Icons.perm_media_outlined,
+                                          size: 48,
+                                        ),
+                                      )
+                                    : Image.file(
+                                        File(preview.path),
+                                        fit: BoxFit.cover,
+                                        width: double.infinity,
+                                        cacheWidth: cacheWidth,
+                                        errorBuilder: (_, error, _) {
+                                          debugPrint(
+                                            '[library] thumbnail failed for '
+                                            '${preview.path}: $error',
+                                          );
+                                          return const Center(
+                                            child: Icon(
+                                              Icons.broken_image_outlined,
+                                            ),
+                                          );
+                                        },
+                                      ),
+                              ),
+                              Padding(
+                                padding: const EdgeInsets.all(8),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                      path.basename(asset.path),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                    Text(
+                                      '${MediaViewOrder.captureDateLabel(asset.captureDate)}  ·  '
+                                      '${MediaViewOrder.sizeLabel(asset.sizeBytes)}',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: Theme.of(
+                                        context,
+                                      ).textTheme.bodySmall,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      }, childCount: group.items.length),
+                    ),
                   ),
-                );
-              },
+                ],
+              ],
             ),
     );
   }

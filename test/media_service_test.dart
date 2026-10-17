@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kinesis/domain/media.dart';
@@ -260,4 +261,98 @@ void main() {
     expect(await File(jpegAsset.path).readAsBytes(), [1, 2, 3]);
     expect(await File(cr3Asset.path).readAsBytes(), [4, 5, 6]);
   });
+
+  test(
+    'scan and library listing expose size and embedded capture date',
+    () async {
+      final source = await Directory.systemTemp.createTemp('kinesis-meta-');
+      final library = await Directory.systemTemp.createTemp('kinesis-library-');
+      addTearDown(() async {
+        await source.delete(recursive: true);
+        await library.delete(recursive: true);
+      });
+      final captureDate = '2024:06:07 08:09:10';
+      final jpeg = File('${source.path}/IMG_0001.JPG');
+      final raw = File('${source.path}/IMG_0001.CR3');
+      final tiff = _exifTiff(
+        original: captureDate,
+        digitized: '2023:01:02 03:04:05',
+        imageDate: '2022:02:03 04:05:06',
+      );
+      await jpeg.writeAsBytes(tiff);
+      await raw.writeAsBytes([1, 2, 3, 4]);
+
+      final service = MediaService();
+      final items = await service.scan(source.path);
+      final pair = items.single;
+      expect(pair.jpeg!.sizeBytes, tiff.length);
+      expect(pair.jpeg!.captureDate, DateTime(2024, 6, 7, 8, 9, 10));
+      expect(pair.cr3!.sizeBytes, 4);
+      expect(pair.cr3!.captureDate, isNull);
+      expect(pair.captureDate, DateTime(2024, 6, 7, 8, 9, 10));
+      expect(pair.sizeBytes, tiff.length + 4);
+
+      final libraryJpeg = File('${library.path}/2024/IMG_0001.JPG');
+      await libraryJpeg.create(recursive: true);
+      await libraryJpeg.writeAsBytes(tiff);
+      final listed = await service.listLibraryMedia(library.path);
+      expect(listed.single.sizeBytes, tiff.length);
+      expect(listed.single.captureDate, DateTime(2024, 6, 7, 8, 9, 10));
+    },
+  );
+
+  test('malformed or missing EXIF timestamps remain unknown', () async {
+    final source = await Directory.systemTemp.createTemp('kinesis-meta-');
+    addTearDown(() => source.delete(recursive: true));
+    await File('${source.path}/IMG_0001.JPG').writeAsBytes([0xff, 0xd8, 0xff]);
+    await File('${source.path}/IMG_0002.JPG').writeAsBytes(
+      _exifTiff(original: '2024:99:99 08:09:10', digitized: '', imageDate: ''),
+    );
+
+    final items = await MediaService().scan(source.path);
+    expect(items, hasLength(2));
+    expect(items.every((item) => item.jpeg!.captureDate == null), isTrue);
+  });
+}
+
+List<int> _exifTiff({
+  required String original,
+  required String digitized,
+  required String imageDate,
+}) {
+  const rootIfdOffset = 8;
+  const exifIfdOffset = 38;
+  const originalOffset = 68;
+  const digitizedOffset = 88;
+  const imageDateOffset = 108;
+  const asciiCount = 20;
+  final bytes = Uint8List(128);
+  final data = ByteData.sublistView(bytes);
+  bytes.setRange(0, 8, [0x49, 0x49, 42, 0, 8, 0, 0, 0]);
+
+  void writeEntry(int offset, int tag, int type, int count, int value) {
+    data.setUint16(offset, tag, Endian.little);
+    data.setUint16(offset + 2, type, Endian.little);
+    data.setUint32(offset + 4, count, Endian.little);
+    data.setUint32(offset + 8, value, Endian.little);
+  }
+
+  data.setUint16(rootIfdOffset, 2, Endian.little);
+  writeEntry(10, 0x0132, 2, asciiCount, imageDateOffset);
+  writeEntry(22, 0x8769, 4, 1, exifIfdOffset);
+  data.setUint32(34, 0, Endian.little);
+  data.setUint16(exifIfdOffset, 2, Endian.little);
+  writeEntry(40, 0x9003, 2, asciiCount, originalOffset);
+  writeEntry(52, 0x9004, 2, asciiCount, digitizedOffset);
+  data.setUint32(64, 0, Endian.little);
+
+  void writeAscii(int offset, String value) {
+    final encoded = [...value.codeUnits, 0];
+    bytes.setRange(offset, offset + encoded.length, encoded);
+  }
+
+  writeAscii(originalOffset, original);
+  writeAscii(digitizedOffset, digitized);
+  writeAscii(imageDateOffset, imageDate);
+  return bytes;
 }

@@ -97,8 +97,9 @@ class MediaViewOrder {
 
   static List<MediaDateGroup<T>> groupByCaptureDate<T>(
     Iterable<T> items,
-    DateTime? Function(T item) dateOf,
-  ) {
+    DateTime? Function(T item) dateOf, {
+    bool newestFirst = true,
+  }) {
     final groups = <String, List<T>>{};
     final dates = <String, DateTime>{};
     for (final item in items) {
@@ -111,7 +112,9 @@ class MediaViewOrder {
       ..sort((a, b) {
         if (a.isEmpty) return b.isEmpty ? 0 : 1;
         if (b.isEmpty) return -1;
-        return dates[b]!.compareTo(dates[a]!);
+        return newestFirst
+            ? dates[b]!.compareTo(dates[a]!)
+            : dates[a]!.compareTo(dates[b]!);
       });
     return [
       for (final key in keys)

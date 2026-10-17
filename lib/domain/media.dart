@@ -51,6 +51,10 @@ class ReviewItem {
   final MediaFile? single;
 
   bool get isPair => jpeg != null || cr3 != null;
+
+  /// True when at least one file is already present in the library. Used to
+  /// default the whole pair to Delete both when re-importing a shot.
+  bool get isDuplicate => files.any((file) => file.alreadyExists);
   List<MediaFile> get files =>
       [jpeg, cr3, single].whereType<MediaFile>().toList();
   String get label => files.map((file) => file.name).join(' + ');
@@ -78,6 +82,13 @@ class ImportPlan {
 class ImportPlanner {
   const ImportPlanner();
 
+  /// Default review decisions for a fresh scan: any item with a file already
+  /// in the library is treated as a duplicate and scheduled for deletion.
+  static Map<int, ReviewDecision> defaultDecisions(List<ReviewItem> items) => {
+    for (var index = 0; index < items.length; index++)
+      if (items[index].isDuplicate) index: ReviewDecision.deleteBoth,
+  };
+
   ImportPlan plan(ReviewItem item, ReviewDecision decision) {
     final selected = switch (decision) {
       ReviewDecision.keepBoth => item.files,
@@ -86,28 +97,9 @@ class ImportPlanner {
       ReviewDecision.deleteBoth => const <MediaFile>[],
     };
     return ImportPlan(
-      toImport: selected,
+      toImport: selected.where((file) => !file.alreadyExists).toList(),
       toDelete: item.files,
       skipped: const [],
-    );
-  }
-
-  ImportPlan includeDuplicates(
-    ImportPlan selectedPlan,
-    Iterable<MediaFile> duplicates,
-  ) {
-    final selectedDeletionPaths = selectedPlan.toDelete
-        .map((file) => file.path)
-        .toSet();
-    return ImportPlan(
-      toImport: selectedPlan.toImport
-          .where((file) => !file.alreadyExists)
-          .toList(),
-      toDelete: [
-        ...selectedPlan.toDelete,
-        ...duplicates.where((file) => selectedDeletionPaths.add(file.path)),
-      ],
-      skipped: selectedPlan.skipped,
     );
   }
 }

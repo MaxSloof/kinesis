@@ -57,12 +57,83 @@ void main() {
       alreadyExists: true,
     );
 
-    final plan = planner.includeDuplicates(
-      const ImportPlan(toImport: [duplicate], toDelete: [], skipped: []),
-      [duplicate],
+    final plan = planner.plan(
+      const ReviewItem(single: duplicate),
+      ReviewDecision.keepBoth,
     );
 
     expect(plan.toImport, isEmpty);
     expect(plan.toDelete, [duplicate]);
+  });
+
+  test('half-duplicate pair defaults to deleting both sources', () {
+    const duplicateJpeg = MediaFile(
+      path: '/camera/IMG_003.jpg',
+      kind: MediaKind.jpeg,
+      alreadyExists: true,
+    );
+    const freshCr3 = MediaFile(
+      path: '/camera/IMG_003.cr3',
+      kind: MediaKind.cr3,
+    );
+    const halfDuplicate = ReviewItem(jpeg: duplicateJpeg, cr3: freshCr3);
+
+    expect(halfDuplicate.isDuplicate, isTrue);
+    final plan = planner.plan(halfDuplicate, ReviewDecision.deleteBoth);
+
+    expect(plan.toImport, isEmpty);
+    expect(plan.toDelete, [duplicateJpeg, freshCr3]);
+  });
+
+  test('overriding a half-duplicate pair imports only the missing half', () {
+    const duplicateJpeg = MediaFile(
+      path: '/camera/IMG_004.jpg',
+      kind: MediaKind.jpeg,
+      alreadyExists: true,
+    );
+    const freshCr3 = MediaFile(
+      path: '/camera/IMG_004.cr3',
+      kind: MediaKind.cr3,
+    );
+    const halfDuplicate = ReviewItem(jpeg: duplicateJpeg, cr3: freshCr3);
+
+    final plan = planner.plan(halfDuplicate, ReviewDecision.keepBoth);
+
+    expect(plan.toImport, [freshCr3]);
+    expect(plan.toDelete, [duplicateJpeg, freshCr3]);
+  });
+
+  test('fully duplicate pair is never copied', () {
+    const duplicateJpeg = MediaFile(
+      path: '/camera/IMG_005.jpg',
+      kind: MediaKind.jpeg,
+      alreadyExists: true,
+    );
+    const duplicateCr3 = MediaFile(
+      path: '/camera/IMG_005.cr3',
+      kind: MediaKind.cr3,
+      alreadyExists: true,
+    );
+
+    final plan = planner.plan(
+      const ReviewItem(jpeg: duplicateJpeg, cr3: duplicateCr3),
+      ReviewDecision.keepBoth,
+    );
+
+    expect(plan.toImport, isEmpty);
+    expect(plan.toDelete, [duplicateJpeg, duplicateCr3]);
+  });
+
+  test('default decisions delete duplicate items only', () {
+    const duplicate = MediaFile(
+      path: '/camera/IMG_006.jpg',
+      kind: MediaKind.jpeg,
+      alreadyExists: true,
+    );
+    final items = [const ReviewItem(single: duplicate), item];
+
+    expect(ImportPlanner.defaultDecisions(items), {
+      0: ReviewDecision.deleteBoth,
+    });
   });
 }

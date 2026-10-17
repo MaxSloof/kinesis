@@ -13,7 +13,12 @@ import 'domain/view_options.dart';
 import 'services/media_service.dart';
 import 'shortcuts.dart';
 
-void main() => runApp(const KinesisApp());
+void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  PaintingBinding.instance.imageCache.maximumSizeBytes = 256 * 1024 * 1024;
+  PaintingBinding.instance.imageCache.maximumSize = 500;
+  runApp(const KinesisApp());
+}
 
 class KinesisApp extends StatelessWidget {
   const KinesisApp({super.key});
@@ -41,6 +46,7 @@ class _KinesisHomeState extends State<KinesisHome> {
   final _media = MediaService();
   final _trash = TrashService();
   final _decisions = <int, ReviewDecision>{};
+  final _autoDecisions = <int>{};
   List<ReviewItem> _items = [];
   LocalStore? _store;
   Set<String> _existingHashes = {};
@@ -82,8 +88,23 @@ class _KinesisHomeState extends State<KinesisHome> {
     super.dispose();
   }
 
-  List<int> get _displayOrder =>
-      MediaViewOrder.sortReviewItemIndices(_items, _sortOrder);
+  List<int>? _displayOrderCache;
+  List<ReviewItem>? _displayOrderItems;
+  MediaSortOrder? _displayOrderSort;
+
+  List<int> get _displayOrder {
+    if (_displayOrderCache == null ||
+        !identical(_displayOrderItems, _items) ||
+        _displayOrderSort != _sortOrder) {
+      _displayOrderItems = _items;
+      _displayOrderSort = _sortOrder;
+      _displayOrderCache = MediaViewOrder.sortReviewItemIndices(
+        _items,
+        _sortOrder,
+      );
+    }
+    return _displayOrderCache!;
+  }
 
   void _changeSortOrder(MediaSortOrder order) {
     if (order == _sortOrder) return;
@@ -176,8 +197,19 @@ class _KinesisHomeState extends State<KinesisHome> {
       dialogTitle: 'Choose your Kinesis media library',
     );
     if (selected == null) return;
-    setState(() => _library = selected);
+    final changed = selected != _library;
+    setState(() {
+      _library = selected;
+      if (changed) {
+        _existingHashes = {};
+        _libraryAssets = [];
+      }
+    });
     await _saveSettings();
+    // Duplicate flags and their default decisions belong to the old library.
+    if (changed && _source != null && !_scanning && !_ingesting) {
+      await _refreshSourceListing();
+    }
   }
 
   Future<void> _chooseSource() async {
@@ -244,7 +276,12 @@ class _KinesisHomeState extends State<KinesisHome> {
       if (mounted) {
         setState(() {
           _items = marked;
-          _decisions.clear();
+          _decisions
+            ..clear()
+            ..addAll(ImportPlanner.defaultDecisions(marked));
+          _autoDecisions
+            ..clear()
+            ..addAll(_decisions.keys);
           _selectedItems.clear();
           _current = 0;
           _gridMode = false;
@@ -339,6 +376,12 @@ class _KinesisHomeState extends State<KinesisHome> {
           }
         }
       }
+      final autoPaths = <String>{};
+      for (final index in _autoDecisions) {
+        if (index < _items.length) {
+          autoPaths.addAll(_items[index].files.map((file) => file.path));
+        }
+      }
       final selectedPaths = <String>{
         for (final index in _selectedItems)
           if (index < _items.length)
@@ -352,17 +395,37 @@ class _KinesisHomeState extends State<KinesisHome> {
           : <String>{};
       setState(() {
         _items = refreshed;
+        _existingHashes
+          ..clear()
+          ..addAll(hashesBySize.values.expand((hashes) => hashes));
+        final preserved = <int, ReviewDecision>{};
+        final preservedAuto = <int>{};
+        for (var index = 0; index < refreshed.length; index++) {
+          final decision = refreshed[index].files
+              .map((file) => decisionsByPath[file.path])
+              .whereType<ReviewDecision>()
+              .firstOrNull;
+          if (decision == null) continue;
+          final wasAuto = refreshed[index].files.every(
+            (file) => autoPaths.contains(file.path),
+          );
+          // Do not keep a defaulted Delete both after the duplicate it was
+          // based on has disappeared from the library.
+          if (wasAuto && !refreshed[index].isDuplicate) continue;
+          preserved[index] = decision;
+          if (wasAuto) preservedAuto.add(index);
+        }
+        for (final entry in ImportPlanner.defaultDecisions(refreshed).entries) {
+          if (preserved.containsKey(entry.key)) continue;
+          preserved[entry.key] = entry.value;
+          preservedAuto.add(entry.key);
+        }
         _decisions
           ..clear()
-          ..addEntries([
-            for (var index = 0; index < refreshed.length; index++)
-              if (refreshed[index].files
-                      .map((file) => decisionsByPath[file.path])
-                      .whereType<ReviewDecision>()
-                      .firstOrNull
-                  case final decision?)
-                MapEntry(index, decision),
-          ]);
+          ..addAll(preserved);
+        _autoDecisions
+          ..clear()
+          ..addAll(preservedAuto);
         _selectedItems
           ..clear()
           ..addAll([
@@ -404,12 +467,15 @@ class _KinesisHomeState extends State<KinesisHome> {
       if (_gridMode && _selectedItems.isNotEmpty) {
         for (final index in _selectedItems) {
           _decisions[index] = decision;
+          _autoDecisions.remove(index);
         }
         return;
       }
       final visibleOrder = _displayOrder;
       if (_current >= visibleOrder.length) return;
-      _decisions[visibleOrder[_current]] = decision;
+      final index = visibleOrder[_current];
+      _decisions[index] = decision;
+      _autoDecisions.remove(index);
       if (_current < visibleOrder.length - 1) _current++;
     });
   }
@@ -420,9 +486,10 @@ class _KinesisHomeState extends State<KinesisHome> {
       if (_library == null) return;
     }
     const planner = ImportPlanner();
-    final selectedPlan = _decisions.entries.fold(
+    final plan = _decisions.entries.fold(
       const ImportPlan(toImport: [], toDelete: [], skipped: []),
       (total, entry) {
+        if (entry.key >= _items.length) return total;
         final next = planner.plan(_items[entry.key], entry.value);
         return ImportPlan(
           toImport: [...total.toImport, ...next.toImport],
@@ -431,21 +498,35 @@ class _KinesisHomeState extends State<KinesisHome> {
         );
       },
     );
-    final duplicateFiles = _items
-        .expand((item) => item.files)
-        .where((file) => file.alreadyExists)
-        .toList();
-    final plan = planner.includeDuplicates(selectedPlan, duplicateFiles);
+    final duplicateItems = <int>{};
+    var duplicateFiles = 0;
+    for (final entry in _decisions.entries) {
+      if (entry.key >= _items.length) continue;
+      final item = _items[entry.key];
+      if (!item.isDuplicate) continue;
+      duplicateItems.add(entry.key);
+      duplicateFiles += item.files.where((file) => file.alreadyExists).length;
+    }
+    final duplicateSummary = duplicateItems.isEmpty
+        ? ''
+        : '$duplicateFiles ${duplicateFiles == 1 ? 'file' : 'files'} in '
+              '${duplicateItems.length} duplicate '
+              '${duplicateItems.length == 1 ? 'item' : 'items'} '
+              '${duplicateFiles == 1 ? 'is' : 'are'} already in the library and '
+              'will not be copied again.\n';
     if (!mounted) return;
     final approved = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Confirm ingest plan'),
         content: Text(
-          '${plan.toImport.length} files will be checked, copied, and SHA-256 verified.\n'
-          '${duplicateFiles.length} confirmed duplicates will be skipped and moved to Trash.\n'
-          '${plan.toDelete.length} source files will move to Trash.\n\n'
-          'Unreviewed items are unchanged.',
+          '${plan.toImport.length} new files will be copied and SHA-256 verified.\n'
+          '$duplicateSummary'
+          '${plan.toDelete.length} source files will move to Trash in total '
+          '(new copies, duplicates, and files marked for deletion).\n\n'
+          'Duplicate items default to Delete both; change a decision to import '
+          'instead.\n'
+          'Items with no decision are unchanged.',
         ),
         actions: [
           TextButton(
@@ -545,7 +626,9 @@ class _KinesisHomeState extends State<KinesisHome> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Ingest completed. $skipped duplicates skipped.'),
+            content: Text(
+              'Ingest completed. ${skipped + duplicateFiles} duplicates skipped.',
+            ),
           ),
         );
       }
@@ -707,13 +790,7 @@ class _KinesisHomeState extends State<KinesisHome> {
         floatingActionButton: _items.isEmpty
             ? null
             : FloatingActionButton.extended(
-                onPressed:
-                    _decisions.isEmpty &&
-                        !_items
-                            .expand((item) => item.files)
-                            .any((file) => file.alreadyExists)
-                    ? null
-                    : _confirm,
+                onPressed: _decisions.isEmpty ? null : _confirm,
                 icon: const Icon(Icons.fact_check_outlined),
                 label: Text('Review plan (${_decisions.length})'),
               ),
@@ -780,12 +857,13 @@ class _KinesisHomeState extends State<KinesisHome> {
                             File(preview.path),
                             fit: BoxFit.contain,
                             cacheWidth: 1600,
+                            gaplessPlayback: true,
                             errorBuilder: (_, _, _) => Text(item.label),
                           ),
                   ),
                 ),
-                if (item.files.any((file) => file.alreadyExists))
-                  Positioned.fill(child: _alreadyExistsOverlay()),
+                if (item.isDuplicate)
+                  Positioned.fill(child: _duplicateOverlay()),
               ],
             ),
           ),
@@ -836,6 +914,25 @@ class _KinesisHomeState extends State<KinesisHome> {
     final next = _current + offset;
     if (next < 0 || next >= _items.length) return;
     setState(() => _current = next);
+    _prefetchAround(next);
+  }
+
+  void _prefetchAround(int index) {
+    if (!mounted) return;
+    final order = _displayOrder;
+    for (final offset in const [1, -1, 2]) {
+      final i = index + offset;
+      if (i < 0 || i >= order.length) continue;
+      final preview = _previewFor(_items[order[i]]);
+      if (preview == null) continue;
+      unawaited(
+        precacheImage(
+          ResizeImage(FileImage(File(preview.path)), width: 1600),
+          context,
+          onError: (_, _) {},
+        ),
+      );
+    }
   }
 
   MediaFile? _previewFor(ReviewItem item) =>
@@ -843,64 +940,94 @@ class _KinesisHomeState extends State<KinesisHome> {
 
   Widget _previewStrip() {
     final visibleOrder = _displayOrder;
-    final first = (_current - 3).clamp(0, visibleOrder.length - 1).toInt();
-    final last = (_current + 3).clamp(0, visibleOrder.length - 1).toInt();
+    const window = 7;
+    final count = visibleOrder.length;
+    final first = (_current - 3)
+        .clamp(0, (count - window).clamp(0, count))
+        .toInt();
+    final last = (first + window - 1).clamp(0, count - 1).toInt();
+    final shown = last - first + 1;
     return SizedBox(
       height: 76,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        itemCount: last - first + 1,
-        separatorBuilder: (_, _) => const SizedBox(width: 8),
-        itemBuilder: (_, stripIndex) {
-          final index = first + stripIndex;
-          final item = _items[visibleOrder[index]];
-          final preview = _previewFor(item);
-          return Semantics(
-            button: true,
-            label: 'Show image ${index + 1}',
-            child: InkWell(
-              onTap: () => setState(() => _current = index),
-              borderRadius: BorderRadius.circular(12),
-              child: Ink(
-                width: 108,
-                decoration: BoxDecoration(
-                  border: Border.all(
-                    color: index == _current
-                        ? Theme.of(context).colorScheme.primary
-                        : Theme.of(context).colorScheme.outlineVariant,
-                    width: index == _current ? 2 : 1,
-                  ),
+      child: Center(
+        child: SizedBox(
+          width: shown * 108.0 + (shown - 1) * 8.0,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            physics: const NeverScrollableScrollPhysics(),
+            itemCount: shown,
+            separatorBuilder: (_, _) => const SizedBox(width: 8),
+            itemBuilder: (_, stripIndex) {
+              final index = first + stripIndex;
+              final item = _items[visibleOrder[index]];
+              final preview = _previewFor(item);
+              return Semantics(
+                button: true,
+                label: 'Show image ${index + 1}',
+                child: InkWell(
+                  onTap: () {
+                    setState(() => _current = index);
+                    _prefetchAround(index);
+                  },
                   borderRadius: BorderRadius.circular(12),
+                  child: Ink(
+                    width: 108,
+                    decoration: BoxDecoration(
+                      border: Border.all(
+                        color: index == _current
+                            ? Theme.of(context).colorScheme.primary
+                            : Theme.of(context).colorScheme.outlineVariant,
+                        width: index == _current ? 2 : 1,
+                      ),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(11),
+                      child: preview == null
+                          ? const Icon(Icons.perm_media_outlined)
+                          : Image.file(
+                              File(preview.path),
+                              fit: BoxFit.cover,
+                              cacheWidth: 216,
+                              gaplessPlayback: true,
+                              errorBuilder: (_, _, _) =>
+                                  const Icon(Icons.broken_image_outlined),
+                            ),
+                    ),
+                  ),
                 ),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(11),
-                  child: preview == null
-                      ? const Icon(Icons.perm_media_outlined)
-                      : Image.file(
-                          File(preview.path),
-                          fit: BoxFit.cover,
-                          cacheWidth: 216,
-                          errorBuilder: (_, _, _) =>
-                              const Icon(Icons.broken_image_outlined),
-                        ),
-                ),
-              ),
-            ),
-          );
-        },
+              );
+            },
+          ),
+        ),
       ),
     );
   }
 
-  Widget _alreadyExistsOverlay() => ColoredBox(
+  Widget _duplicateOverlay() => ColoredBox(
     color: Colors.white60,
     child: Center(
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
         color: Colors.black54,
-        child: const Text(
-          'Already exists',
-          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+        child: const Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'Duplicate',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            SizedBox(height: 2),
+            Text(
+              'sources deleted by default',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white70, fontSize: 11),
+            ),
+          ],
         ),
       ),
     ),
@@ -911,6 +1038,7 @@ class _KinesisHomeState extends State<KinesisHome> {
         ? MediaViewOrder.groupByCaptureDate<int>(
             visibleOrder,
             (index) => _items[index].captureDate,
+            newestFirst: _sortOrder != MediaSortOrder.captureOldest,
           )
         : [MediaDateGroup(label: '', items: visibleOrder)];
     return Column(
@@ -1008,7 +1136,7 @@ class _KinesisHomeState extends State<KinesisHome> {
     final preview = _previewFor(item);
     final selected = _selectedItems.contains(logicalIndex);
     final decision = _decisions[logicalIndex];
-    final alreadyExists = item.files.any((file) => file.alreadyExists);
+    final isDuplicate = item.isDuplicate;
     return InkWell(
       onTap: () => setState(
         () => selected
@@ -1087,7 +1215,7 @@ class _KinesisHomeState extends State<KinesisHome> {
                 top: 6,
                 child: Chip(label: Text(_decisionLabel(decision))),
               ),
-            if (alreadyExists) Positioned.fill(child: _alreadyExistsOverlay()),
+            if (isDuplicate) Positioned.fill(child: _duplicateOverlay()),
           ],
         ),
       ),
@@ -1348,6 +1476,7 @@ class _LibraryPageState extends State<LibraryPage> {
         ? MediaViewOrder.groupByCaptureDate<MediaFile>(
             assets,
             (asset) => asset.captureDate,
+            newestFirst: _sortOrder != MediaSortOrder.captureOldest,
           )
         : [MediaDateGroup(label: '', items: assets)];
     final cacheWidth = (180 * MediaQuery.devicePixelRatioOf(context)).round();

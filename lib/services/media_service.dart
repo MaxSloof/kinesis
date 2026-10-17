@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:crypto/crypto.dart';
 import 'package:exif/exif.dart';
@@ -27,16 +28,10 @@ class MediaService {
   Future<DateTime?> _readCaptureDate(File file, MediaKind kind) async {
     if (kind == MediaKind.cr3 || kind == MediaKind.video) return null;
     try {
-      final tags = await readExifFromFile(file);
-      for (final name in const [
-        'EXIF DateTimeOriginal',
-        'EXIF DateTimeDigitized',
-        'Image DateTime',
-      ]) {
-        final value = tags[name]?.printable;
-        final parsed = value == null ? null : _parseExifDate(value);
-        if (parsed != null) return parsed;
-      }
+      final value = await Isolate.run(
+        () => _readExifDateString(file.path, kind == MediaKind.jpeg),
+      );
+      return value == null ? null : _parseExifDate(value);
     } on Object catch (error) {
       debugPrint(
         '[metadata] could not read capture date for ${file.path}: $error',
@@ -503,18 +498,24 @@ class MediaService {
   Future<List<MediaFile>> listLibraryMedia(String library) async {
     final files = await _libraryFiles(library);
     files.sort((a, b) => a.path.compareTo(b.path));
-    return [
-      for (final file in files)
-        MediaFile(
+    final result = List<MediaFile?>.filled(files.length, null);
+    var next = 0;
+    Future<void> worker() async {
+      while (next < files.length) {
+        final i = next++;
+        final file = files[i];
+        final kind = _extensions[path.extension(file.path).toLowerCase()]!;
+        result[i] = MediaFile(
           path: file.absolutePath,
-          kind: _extensions[path.extension(file.path).toLowerCase()]!,
+          kind: kind,
           sizeBytes: file.size,
-          captureDate: await _readCaptureDate(
-            File(file.absolutePath),
-            _extensions[path.extension(file.path).toLowerCase()]!,
-          ),
-        ),
-    ];
+          captureDate: await _readCaptureDate(File(file.absolutePath), kind),
+        );
+      }
+    }
+
+    await Future.wait([for (var w = 0; w < 6; w++) worker()]);
+    return result.cast<MediaFile>();
   }
 
   Future<List<_LibraryFile>> _libraryFiles(String library) async {
@@ -632,6 +633,32 @@ class MediaService {
       .replaceAll('{day}', date.day.toString().padLeft(2, '0'))
       .replaceAll('{originalName}', name)
       .replaceAll('{sourceFolder}', sourceFolder);
+}
+
+/// Runs in a worker isolate. JPEG EXIF lives in the first few dozen KB, so only
+/// the head of the file is read instead of the whole image.
+Future<String?> _readExifDateString(String filePath, bool headOnly) async {
+  final Map<String, IfdTag> tags;
+  if (headOnly) {
+    final raf = await File(filePath).open();
+    try {
+      final bytes = await raf.read(256 * 1024);
+      tags = await readExifFromBytes(bytes);
+    } finally {
+      await raf.close();
+    }
+  } else {
+    tags = await readExifFromFile(File(filePath));
+  }
+  for (final name in const [
+    'EXIF DateTimeOriginal',
+    'EXIF DateTimeDigitized',
+    'Image DateTime',
+  ]) {
+    final value = tags[name]?.printable;
+    if (value != null) return value;
+  }
+  return null;
 }
 
 class _LibraryFile {

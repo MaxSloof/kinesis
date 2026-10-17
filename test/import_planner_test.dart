@@ -49,4 +49,20 @@ void main() {
     expect(plan.toImport, [video]);
     expect(plan.toDelete, [video]);
   });
+
+  test('confirmed duplicate is deleted without being copied', () {
+    const duplicate = MediaFile(
+      path: '/camera/IMG_002.jpg',
+      kind: MediaKind.jpeg,
+      alreadyExists: true,
+    );
+
+    final plan = planner.includeDuplicates(
+      const ImportPlan(toImport: [duplicate], toDelete: [], skipped: []),
+      [duplicate],
+    );
+
+    expect(plan.toImport, isEmpty);
+    expect(plan.toDelete, [duplicate]);
+  });
 }

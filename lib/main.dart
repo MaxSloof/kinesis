@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as path;
@@ -56,12 +58,25 @@ class _KinesisHomeState extends State<KinesisHome> {
   int _current = 0;
   bool _scanning = false;
   bool _gridMode = false;
+  String? _source;
+  StreamSubscription<FileSystemEvent>? _sourceWatch;
+  Timer? _sourceRefreshTimer;
+  bool _refreshingSource = false;
+  bool _sourceRefreshPending = false;
+  bool _ingesting = false;
   final _selectedItems = <int>{};
 
   @override
   void initState() {
     super.initState();
     _loadSettings();
+  }
+
+  @override
+  void dispose() {
+    _sourceRefreshTimer?.cancel();
+    _sourceWatch?.cancel();
+    super.dispose();
   }
 
   Future<void> _loadSettings() async {
@@ -104,9 +119,13 @@ class _KinesisHomeState extends State<KinesisHome> {
     final library = _library;
     if (library == null) return;
     try {
-      final hashes = await _media.loadLibraryHashes(library);
+      final hashes = await Future.wait(
+        _indexRoots(library).map(_media.loadLibraryHashes),
+      );
       if (!mounted) return;
-      setState(() => _existingHashes.addAll(hashes));
+      setState(() {
+        _existingHashes = hashes.expand((value) => value).toSet();
+      });
       await _saveSettings();
     } on FileSystemException {
       // Library access can be unavailable when a removable volume is absent.
@@ -142,23 +161,62 @@ class _KinesisHomeState extends State<KinesisHome> {
       dialogTitle: 'Choose a camera card or source folder',
     );
     if (selected == null) return;
+    final previousSource = _source;
+    _source = selected;
+    _sourceRefreshTimer?.cancel();
+    final previousWatch = _sourceWatch;
+    _sourceWatch = null;
+    await previousWatch?.cancel();
     setState(() => _scanning = true);
+    final scanWatch = Stopwatch()..start();
+    debugPrint('[scan] source=$selected started');
     try {
+      final sourceWatch = Stopwatch()..start();
       final scanned = await _media.scan(selected);
-      final sourceSizes = <int>{};
-      for (final file in scanned.expand((item) => item.files)) {
-        sourceSizes.add((await File(file.path).stat()).size);
+      sourceWatch.stop();
+      final sourceFileCount = scanned.fold<int>(
+        0,
+        (count, item) => count + item.files.length,
+      );
+      debugPrint(
+        '[scan] source listing: ${sourceWatch.elapsedMilliseconds}ms, '
+        '$sourceFileCount files in ${scanned.length} review items',
+      );
+      final libraryWatch = Stopwatch()..start();
+      final libraryHashesBySize = <int, Set<String>>{};
+      if (_library != null) {
+        final indexes = await Future.wait(
+          _indexRoots(_library!).map(_media.libraryHashesBySize),
+        );
+        for (final index in indexes) {
+          for (final entry in index.entries) {
+            libraryHashesBySize
+                .putIfAbsent(entry.key, () => {})
+                .addAll(entry.value);
+          }
+        }
       }
-      final libraryHashes = _library == null
-          ? <String>{}
-          : await _media.loadLibraryHashes(
-              _library!,
-              candidateSizes: sourceSizes,
-            );
-      final marked = await _media.markExisting(scanned, {
-        ..._existingHashes,
-        ...libraryHashes,
-      });
+      libraryWatch.stop();
+      final libraryFileCount = libraryHashesBySize.values.fold<int>(
+        0,
+        (count, hashes) => count + hashes.length,
+      );
+      debugPrint(
+        '[scan] destination index: ${libraryWatch.elapsedMilliseconds}ms, '
+        '$libraryFileCount files in ${libraryHashesBySize.length} size groups',
+      );
+      final duplicateWatch = Stopwatch()..start();
+      final marked = await _media.markExisting(scanned, libraryHashesBySize);
+      duplicateWatch.stop();
+      final duplicateCount = marked.fold<int>(
+        0,
+        (count, item) =>
+            count + item.files.where((file) => file.alreadyExists).length,
+      );
+      debugPrint(
+        '[scan] duplicate check: ${duplicateWatch.elapsedMilliseconds}ms, '
+        '$duplicateCount exact duplicates',
+      );
       if (mounted) {
         setState(() {
           _items = marked;
@@ -166,17 +224,144 @@ class _KinesisHomeState extends State<KinesisHome> {
           _selectedItems.clear();
           _current = 0;
           _gridMode = false;
-          _existingHashes.addAll(libraryHashes);
+          _existingHashes.addAll(
+            libraryHashesBySize.values.expand((hashes) => hashes),
+          );
         });
+        await _watchSource(selected);
       }
-    } on FileSystemException catch (error) {
+    } on Object catch (error, stackTrace) {
+      debugPrint('[scan] failed: $error');
+      debugPrintStack(stackTrace: stackTrace);
       if (mounted) {
+        if (previousSource == null) {
+          _source = null;
+        } else {
+          await _watchSource(previousSource);
+        }
+        if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not scan source: ${error.message}')),
+          SnackBar(content: Text('Could not scan source: $error')),
         );
       }
     } finally {
+      scanWatch.stop();
+      debugPrint('[scan] completed in ${scanWatch.elapsedMilliseconds}ms');
       if (mounted) setState(() => _scanning = false);
+    }
+  }
+
+  Future<void> _watchSource(String source) async {
+    _sourceRefreshTimer?.cancel();
+    final previousWatch = _sourceWatch;
+    _sourceWatch = null;
+    await previousWatch?.cancel();
+    _source = source;
+    try {
+      _sourceWatch = Directory(source)
+          .watch(recursive: true)
+          .listen(
+            (_) => _scheduleSourceRefresh(),
+            onError: (Object error) {
+              debugPrint('[scan] source watch failed: $error');
+            },
+          );
+    } on FileSystemException catch (error) {
+      debugPrint('[scan] could not watch source folder: $error');
+    }
+  }
+
+  void _scheduleSourceRefresh() {
+    _sourceRefreshTimer?.cancel();
+    _sourceRefreshTimer = Timer(const Duration(milliseconds: 250), () {
+      if (_ingesting) {
+        _sourceRefreshPending = true;
+        return;
+      }
+      unawaited(_refreshSourceListing());
+    });
+  }
+
+  Future<void> _refreshSourceListing() async {
+    final source = _source;
+    if (!mounted || source == null) return;
+    if (_ingesting || _refreshingSource) {
+      _sourceRefreshPending = true;
+      return;
+    }
+    _refreshingSource = true;
+    try {
+      final scanned = await _media.scan(source);
+      final hashesBySize = <int, Set<String>>{};
+      final library = _library;
+      if (library != null) {
+        final indexes = await Future.wait(
+          _indexRoots(library).map(_media.libraryHashesBySize),
+        );
+        for (final index in indexes) {
+          for (final entry in index.entries) {
+            hashesBySize.putIfAbsent(entry.key, () => {}).addAll(entry.value);
+          }
+        }
+      }
+      final refreshed = await _media.markExisting(scanned, hashesBySize);
+      if (!mounted || _source != source) return;
+
+      final decisionsByPath = <String, ReviewDecision>{};
+      for (final entry in _decisions.entries) {
+        if (entry.key < _items.length) {
+          for (final file in _items[entry.key].files) {
+            decisionsByPath[file.path] = entry.value;
+          }
+        }
+      }
+      final selectedPaths = <String>{
+        for (final index in _selectedItems)
+          if (index < _items.length)
+            for (final file in _items[index].files) file.path,
+      };
+      final currentPaths = _current < _items.length
+          ? _items[_current].files.map((file) => file.path).toSet()
+          : <String>{};
+      setState(() {
+        _items = refreshed;
+        _decisions
+          ..clear()
+          ..addEntries([
+            for (var index = 0; index < refreshed.length; index++)
+              if (refreshed[index].files
+                      .map((file) => decisionsByPath[file.path])
+                      .whereType<ReviewDecision>()
+                      .firstOrNull
+                  case final decision?)
+                MapEntry(index, decision),
+          ]);
+        _selectedItems
+          ..clear()
+          ..addAll([
+            for (var index = 0; index < refreshed.length; index++)
+              if (refreshed[index].files.any(
+                (file) => selectedPaths.contains(file.path),
+              ))
+                index,
+          ]);
+        final matchingCurrent = refreshed.indexWhere(
+          (item) => item.files.any((file) => currentPaths.contains(file.path)),
+        );
+        _current = refreshed.isEmpty
+            ? 0
+            : matchingCurrent >= 0
+            ? matchingCurrent
+            : _current.clamp(0, refreshed.length - 1).toInt();
+      });
+    } on FileSystemException catch (error) {
+      debugPrint('[scan] source refresh failed: $error');
+    } finally {
+      _refreshingSource = false;
+      if (_sourceRefreshPending && mounted && !_ingesting) {
+        _sourceRefreshPending = false;
+        _scheduleSourceRefresh();
+      }
     }
   }
 
@@ -200,7 +385,7 @@ class _KinesisHomeState extends State<KinesisHome> {
       if (_library == null) return;
     }
     const planner = ImportPlanner();
-    final plan = _decisions.entries.fold(
+    final selectedPlan = _decisions.entries.fold(
       const ImportPlan(toImport: [], toDelete: [], skipped: []),
       (total, entry) {
         final next = planner.plan(_items[entry.key], entry.value);
@@ -211,6 +396,11 @@ class _KinesisHomeState extends State<KinesisHome> {
         );
       },
     );
+    final duplicateFiles = _items
+        .expand((item) => item.files)
+        .where((file) => file.alreadyExists)
+        .toList();
+    final plan = planner.includeDuplicates(selectedPlan, duplicateFiles);
     if (!mounted) return;
     final approved = await showDialog<bool>(
       context: context,
@@ -218,7 +408,7 @@ class _KinesisHomeState extends State<KinesisHome> {
         title: const Text('Confirm ingest plan'),
         content: Text(
           '${plan.toImport.length} files will be checked, copied, and SHA-256 verified.\n'
-          'Already-imported files will be skipped before copying.\n'
+          '${duplicateFiles.length} confirmed duplicates will be skipped and moved to Trash.\n'
           '${plan.toDelete.length} source files will move to Trash.\n\n'
           'Unreviewed items are unchanged.',
         ),
@@ -234,15 +424,51 @@ class _KinesisHomeState extends State<KinesisHome> {
         ],
       ),
     );
-    if (approved != true) return;
+    if (approved != true || !mounted) return;
+    _ingesting = true;
     final knownHashes = <String>{..._existingHashes};
     final importedAssets = <ImportedAsset>[];
     var skipped = 0;
+    final totalSteps = plan.toImport.length + plan.toDelete.length;
+    final progress = ValueNotifier(
+      _IngestProgress(
+        phase: 'Copying and verifying',
+        done: 0,
+        total: totalSteps,
+      ),
+    );
+    var stepsDone = 0;
+    void step(String phase, String? file) {
+      stepsDone++;
+      progress.value = _IngestProgress(
+        phase: phase,
+        done: stepsDone,
+        total: totalSteps,
+        currentFile: file,
+      );
+    }
+
+    _progressOpen = true;
+    final dialogClosed = showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => PopScope(
+        canPop: false,
+        child: _IngestProgressDialog(progress: progress),
+      ),
+    );
     try {
       for (final file in plan.toImport) {
+        progress.value = _IngestProgress(
+          phase: 'Copying and verifying',
+          done: stepsDone,
+          total: totalSteps,
+          currentFile: path.basename(file.path),
+        );
         final sourceHash = await _media.hashFile(file.path);
         if (!knownHashes.add(sourceHash)) {
           skipped++;
+          step('Copying and verifying', path.basename(file.path));
           continue;
         }
         importedAssets.add(
@@ -252,20 +478,35 @@ class _KinesisHomeState extends State<KinesisHome> {
             _templateFor(file),
           ),
         );
+        step('Copying and verifying', path.basename(file.path));
       }
+      progress.value = _IngestProgress(
+        phase: 'Updating library index',
+        done: stepsDone,
+        total: totalSteps,
+      );
       _existingHashes.addAll(importedAssets.map((asset) => asset.hash));
       _libraryAssets.addAll(importedAssets);
-      final libraryHashes = await _media.loadLibraryHashes(_library!);
-      await _media.writeLibraryHashes(_library!, {
-        ...libraryHashes,
-        ...importedAssets.map((asset) => asset.hash),
-      });
+      await Future.wait(
+        _indexRoots(_library!).map(
+          (root) =>
+              _media.writeImportedAssetsToLibraryIndex(root, importedAssets),
+        ),
+      );
       await _saveSettings();
       for (final file in plan.toDelete) {
+        progress.value = _IngestProgress(
+          phase: 'Moving sources to Trash',
+          done: stepsDone,
+          total: totalSteps,
+          currentFile: path.basename(file.path),
+        );
         if (await File(file.path).exists()) {
           await _trash.moveToTrash(file.path);
         }
+        step('Moving sources to Trash', path.basename(file.path));
       }
+      _closeProgress(dialogClosed);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -274,12 +515,14 @@ class _KinesisHomeState extends State<KinesisHome> {
         );
       }
     } on FileSystemException catch (error) {
+      _closeProgress(dialogClosed);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Ingest stopped: ${error.message}')),
         );
       }
     } on PlatformException catch (error) {
+      _closeProgress(dialogClosed);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -289,7 +532,23 @@ class _KinesisHomeState extends State<KinesisHome> {
           ),
         );
       }
+    } finally {
+      _closeProgress(dialogClosed);
+      await dialogClosed;
+      progress.dispose();
+      _ingesting = false;
+      _sourceRefreshPending = false;
+      _sourceRefreshTimer?.cancel();
+      await _refreshSourceListing();
     }
+  }
+
+  bool _progressOpen = false;
+
+  void _closeProgress(Future<void> dialogClosed) {
+    if (!_progressOpen) return;
+    _progressOpen = false;
+    if (mounted) Navigator.of(context, rootNavigator: true).pop();
   }
 
   String _templateFor(MediaFile file) {
@@ -301,12 +560,34 @@ class _KinesisHomeState extends State<KinesisHome> {
     };
   }
 
+  Iterable<String> _indexRoots(String library) => {
+    if (_splitRawAndJpeg) ...[
+      _indexRoot(library, _jpegTemplate),
+      _indexRoot(library, _cr3Template),
+    ] else
+      _indexRoot(library, _template),
+  };
+
+  String _indexRoot(String library, String template) {
+    final parts = path.split(template);
+    final fixedParts = <String>[];
+    for (final part in parts) {
+      if (part.contains('{')) break;
+      fixedParts.add(part);
+    }
+    return path.joinAll([library, ...fixedParts]);
+  }
+
   @override
   Widget build(BuildContext context) => CallbackShortcuts(
     bindings: {
       for (final decision in ReviewDecision.values)
         SingleActivator(logicalKeyForShortcut(_shortcuts[decision]!)): () =>
             _decide(decision),
+      const SingleActivator(LogicalKeyboardKey.arrowLeft): () =>
+          _moveCurrent(-1),
+      const SingleActivator(LogicalKeyboardKey.arrowRight): () =>
+          _moveCurrent(1),
     },
     child: Focus(
       autofocus: true,
@@ -350,7 +631,13 @@ class _KinesisHomeState extends State<KinesisHome> {
         floatingActionButton: _items.isEmpty
             ? null
             : FloatingActionButton.extended(
-                onPressed: _decisions.isEmpty ? null : _confirm,
+                onPressed:
+                    _decisions.isEmpty &&
+                        !_items
+                            .expand((item) => item.files)
+                            .any((file) => file.alreadyExists)
+                    ? null
+                    : _confirm,
                 icon: const Icon(Icons.fact_check_outlined),
                 label: Text('Review plan (${_decisions.length})'),
               ),
@@ -384,9 +671,7 @@ class _KinesisHomeState extends State<KinesisHome> {
 
   Widget _review() {
     final item = _items[_current];
-    final preview =
-        item.jpeg ??
-        (item.single?.kind == MediaKind.image ? item.single : null);
+    final preview = _previewFor(item);
     return Padding(
       padding: const EdgeInsets.all(32),
       child: Column(
@@ -428,6 +713,8 @@ class _KinesisHomeState extends State<KinesisHome> {
             ),
           ),
           const SizedBox(height: 16),
+          _previewStrip(),
+          const SizedBox(height: 12),
           Text(item.label, textAlign: TextAlign.center),
           const SizedBox(height: 12),
           Wrap(
@@ -457,6 +744,66 @@ class _KinesisHomeState extends State<KinesisHome> {
             ],
           ),
         ],
+      ),
+    );
+  }
+
+  void _moveCurrent(int offset) {
+    if (_gridMode) return;
+    final next = _current + offset;
+    if (next < 0 || next >= _items.length) return;
+    setState(() => _current = next);
+  }
+
+  MediaFile? _previewFor(ReviewItem item) =>
+      item.jpeg ?? (item.single?.kind == MediaKind.image ? item.single : null);
+
+  Widget _previewStrip() {
+    final first = (_current - 3).clamp(0, _items.length - 1).toInt();
+    final last = (_current + 3).clamp(0, _items.length - 1).toInt();
+    return SizedBox(
+      height: 76,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: last - first + 1,
+        separatorBuilder: (_, _) => const SizedBox(width: 8),
+        itemBuilder: (_, stripIndex) {
+          final index = first + stripIndex;
+          final item = _items[index];
+          final preview = _previewFor(item);
+          return Semantics(
+            button: true,
+            label: 'Show image ${index + 1}',
+            child: InkWell(
+              onTap: () => setState(() => _current = index),
+              borderRadius: BorderRadius.circular(12),
+              child: Ink(
+                width: 108,
+                decoration: BoxDecoration(
+                  border: Border.all(
+                    color: index == _current
+                        ? Theme.of(context).colorScheme.primary
+                        : Theme.of(context).colorScheme.outlineVariant,
+                    width: index == _current ? 2 : 1,
+                  ),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(11),
+                  child: preview == null
+                      ? const Icon(Icons.perm_media_outlined)
+                      : Image.file(
+                          File(preview.path),
+                          fit: BoxFit.cover,
+                          cacheWidth: 216,
+                          errorBuilder: (_, _, _) =>
+                              const Icon(Icons.broken_image_outlined),
+                        ),
+                ),
+              ),
+            ),
+          );
+        },
       ),
     );
   }
@@ -547,9 +894,7 @@ class _KinesisHomeState extends State<KinesisHome> {
 
   Widget _gridTile(int index) {
     final item = _items[index];
-    final preview =
-        item.jpeg ??
-        (item.single?.kind == MediaKind.image ? item.single : null);
+    final preview = _previewFor(item);
     final selected = _selectedItems.contains(index);
     final decision = _decisions[index];
     final alreadyExists = item.files.any((file) => file.alreadyExists);
@@ -632,56 +977,58 @@ class _KinesisHomeState extends State<KinesisHome> {
         title: const Text('Settings'),
         content: SizedBox(
           width: 420,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: controller,
-                decoration: const InputDecoration(
-                  labelText: 'Destination template',
-                  helperText:
-                      'Tokens: {year}, {month}, {day}, {originalName}, {sourceFolder}',
-                ),
-              ),
-              StatefulBuilder(
-                builder: (context, setDialogState) => Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    CheckboxListTile(
-                      contentPadding: EdgeInsets.zero,
-                      value: splitRawAndJpeg,
-                      title: const Text('Use separate JPEG and CRAW folders'),
-                      onChanged: (value) => setDialogState(
-                        () => splitRawAndJpeg = value ?? false,
-                      ),
-                    ),
-                    if (splitRawAndJpeg) ...[
-                      TextField(
-                        controller: jpegController,
-                        decoration: const InputDecoration(
-                          labelText: 'JPEG destination template',
-                        ),
-                      ),
-                      TextField(
-                        controller: cr3Controller,
-                        decoration: const InputDecoration(
-                          labelText: 'CRAW destination template',
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              for (final decision in ReviewDecision.values)
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
                 TextField(
-                  controller: keys[decision],
-                  maxLength: 1,
-                  textCapitalization: TextCapitalization.characters,
-                  decoration: InputDecoration(
-                    labelText: '${decision.name} shortcut',
+                  controller: controller,
+                  decoration: const InputDecoration(
+                    labelText: 'Destination template',
+                    helperText:
+                        'Tokens: {year}, {month}, {day}, {originalName}, {sourceFolder}',
                   ),
                 ),
-            ],
+                StatefulBuilder(
+                  builder: (context, setDialogState) => Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      CheckboxListTile(
+                        contentPadding: EdgeInsets.zero,
+                        value: splitRawAndJpeg,
+                        title: const Text('Use separate JPEG and CRAW folders'),
+                        onChanged: (value) => setDialogState(
+                          () => splitRawAndJpeg = value ?? false,
+                        ),
+                      ),
+                      if (splitRawAndJpeg) ...[
+                        TextField(
+                          controller: jpegController,
+                          decoration: const InputDecoration(
+                            labelText: 'JPEG destination template',
+                          ),
+                        ),
+                        TextField(
+                          controller: cr3Controller,
+                          decoration: const InputDecoration(
+                            labelText: 'CRAW destination template',
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                for (final decision in ReviewDecision.values)
+                  TextField(
+                    controller: keys[decision],
+                    maxLength: 1,
+                    textCapitalization: TextCapitalization.characters,
+                    decoration: InputDecoration(
+                      labelText: '${decision.name} shortcut',
+                    ),
+                  ),
+              ],
+            ),
           ),
         ),
         actions: [
@@ -725,64 +1072,269 @@ class _KinesisHomeState extends State<KinesisHome> {
     await _saveSettings();
   }
 
-  Future<void> _showLibrary() => Navigator.of(context).push(
-    MaterialPageRoute<void>(
-      builder: (_) => LibraryPage(assets: _libraryAssets),
-    ),
-  );
+  Future<void> _showLibrary() async {
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => LibraryPage(libraryPath: _library, media: _media),
+      ),
+    );
+  }
 }
 
-class LibraryPage extends StatelessWidget {
-  const LibraryPage({super.key, required this.assets});
+class LibraryPage extends StatefulWidget {
+  const LibraryPage({
+    super.key,
+    required this.libraryPath,
+    required this.media,
+  });
 
-  final List<ImportedAsset> assets;
+  final String? libraryPath;
+  final MediaService media;
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Library')),
-    body: assets.isEmpty
-        ? const Center(child: Text('Imported media will appear here.'))
-        : GridView.builder(
-            padding: const EdgeInsets.all(16),
-            gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-              maxCrossAxisExtent: 180,
-              mainAxisSpacing: 12,
-              crossAxisSpacing: 12,
-            ),
-            itemCount: assets.length,
-            itemBuilder: (_, index) {
-              final asset = assets[index];
-              final previewable =
-                  asset.kind == MediaKind.jpeg || asset.kind == MediaKind.image;
-              return Card(
-                clipBehavior: Clip.antiAlias,
-                child: Column(
-                  children: [
-                    Expanded(
-                      child: previewable
-                          ? Image.file(
-                              File(asset.path),
-                              fit: BoxFit.cover,
-                              width: double.infinity,
-                              errorBuilder: (_, _, _) =>
-                                  const Icon(Icons.broken_image_outlined),
-                            )
-                          : const Center(
-                              child: Icon(Icons.perm_media_outlined, size: 48),
-                            ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.all(8),
-                      child: Text(
-                        path.basename(asset.path),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
-              );
+  State<LibraryPage> createState() => _LibraryPageState();
+}
+
+class _LibraryPageState extends State<LibraryPage> {
+  List<MediaFile> _assets = [];
+  StreamSubscription<FileSystemEvent>? _libraryWatch;
+  Timer? _refreshTimer;
+  bool _loading = true;
+  bool _refreshing = false;
+  bool _refreshPending = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _watchLibrary();
+    unawaited(_refreshLibrary());
+  }
+
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    _libraryWatch?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _watchLibrary() async {
+    final library = widget.libraryPath;
+    if (library == null || !await Directory(library).exists() || !mounted) {
+      return;
+    }
+    try {
+      _libraryWatch = Directory(library)
+          .watch(recursive: true)
+          .listen(
+            (_) => _scheduleRefresh(),
+            onError: (Object error) {
+              debugPrint('[library] filesystem watch failed: $error');
             },
-          ),
+          );
+    } on FileSystemException catch (error) {
+      debugPrint('[library] could not watch library folder: $error');
+    }
+  }
+
+  void _scheduleRefresh() {
+    _refreshTimer?.cancel();
+    _refreshTimer = Timer(const Duration(milliseconds: 300), () {
+      unawaited(_refreshLibrary());
+    });
+  }
+
+  Future<void> _refreshLibrary() async {
+    final library = widget.libraryPath;
+    if (_refreshing) {
+      _refreshPending = true;
+      return;
+    }
+    _refreshing = true;
+    try {
+      if (library == null) {
+        if (mounted) {
+          setState(() {
+            _assets = [];
+            _loading = false;
+            _error = 'Choose a library folder to browse its media.';
+          });
+        }
+        return;
+      }
+      final assets = await widget.media.listLibraryMedia(library);
+      if (!mounted) return;
+      setState(() {
+        _assets = assets;
+        _loading = false;
+        _error = null;
+      });
+    } on FileSystemException catch (error) {
+      debugPrint('[library] scan failed: $error');
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _error = 'Could not read the selected library folder.';
+        });
+      }
+    } finally {
+      _refreshing = false;
+      if (_refreshPending && mounted) {
+        _refreshPending = false;
+        _scheduleRefresh();
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final jpegPreviews = <String, MediaFile>{
+      for (final asset in _assets)
+        if (asset.kind == MediaKind.jpeg) _pairKey(asset.path): asset,
+    };
+    final cacheWidth = (180 * MediaQuery.devicePixelRatioOf(context)).round();
+    return Scaffold(
+      appBar: AppBar(title: const Text('Library')),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _error != null
+          ? Center(child: Text(_error!))
+          : _assets.isEmpty
+          ? const Center(child: Text('No media files in this library folder.'))
+          : GridView.builder(
+              padding: const EdgeInsets.all(16),
+              gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                maxCrossAxisExtent: 180,
+                mainAxisSpacing: 12,
+                crossAxisSpacing: 12,
+              ),
+              itemCount: _assets.length,
+              itemBuilder: (_, index) {
+                final asset = _assets[index];
+                final preview = switch (asset.kind) {
+                  MediaKind.jpeg || MediaKind.image => asset,
+                  MediaKind.cr3 => jpegPreviews[_pairKey(asset.path)],
+                  MediaKind.video => null,
+                };
+                return Card(
+                  clipBehavior: Clip.antiAlias,
+                  child: Column(
+                    children: [
+                      Expanded(
+                        child: preview == null
+                            ? const Center(
+                                child: Icon(
+                                  Icons.perm_media_outlined,
+                                  size: 48,
+                                ),
+                              )
+                            : Image.file(
+                                File(preview.path),
+                                fit: BoxFit.cover,
+                                width: double.infinity,
+                                cacheWidth: cacheWidth,
+                                errorBuilder: (_, error, _) {
+                                  debugPrint(
+                                    '[library] thumbnail failed for '
+                                    '${preview.path}: $error',
+                                  );
+                                  return const Center(
+                                    child: Icon(Icons.broken_image_outlined),
+                                  );
+                                },
+                              ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.all(8),
+                        child: Text(
+                          path.basename(asset.path),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+    );
+  }
+
+  String _pairKey(String filePath) =>
+      '${path.dirname(filePath).toLowerCase()}/'
+      '${path.basenameWithoutExtension(filePath).toLowerCase()}';
+}
+
+class _IngestProgress {
+  const _IngestProgress({
+    required this.phase,
+    required this.done,
+    required this.total,
+    this.currentFile,
+  });
+
+  final String phase;
+  final int done;
+  final int total;
+  final String? currentFile;
+
+  double? get fraction => total == 0 ? null : done / total;
+}
+
+class _IngestProgressDialog extends StatelessWidget {
+  const _IngestProgressDialog({required this.progress});
+
+  final ValueListenable<_IngestProgress> progress;
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Ingesting'),
+    content: SizedBox(
+      width: 380,
+      child: ValueListenableBuilder<_IngestProgress>(
+        valueListenable: progress,
+        builder: (context, value, _) {
+          final theme = Theme.of(context);
+          final fraction = value.fraction;
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(value.phase, style: theme.textTheme.titleSmall),
+              const SizedBox(height: 12),
+              TweenAnimationBuilder<double>(
+                tween: Tween(end: fraction ?? 0),
+                duration: const Duration(milliseconds: 250),
+                curve: Curves.easeOut,
+                builder: (context, animated, _) => LinearProgressIndicator(
+                  value: fraction == null ? null : animated,
+                  minHeight: 8,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      value.currentFile ?? '',
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Text(
+                    '${value.done} / ${value.total}'
+                    '${fraction == null ? '' : '  ·  ${(fraction * 100).round()}%'}',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            ],
+          );
+        },
+      ),
+    ),
   );
 }

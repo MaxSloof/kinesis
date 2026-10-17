@@ -72,4 +72,23 @@ class ImportPlanner {
       skipped: const [],
     );
   }
+
+  ImportPlan includeDuplicates(
+    ImportPlan selectedPlan,
+    Iterable<MediaFile> duplicates,
+  ) {
+    final selectedDeletionPaths = selectedPlan.toDelete
+        .map((file) => file.path)
+        .toSet();
+    return ImportPlan(
+      toImport: selectedPlan.toImport
+          .where((file) => !file.alreadyExists)
+          .toList(),
+      toDelete: [
+        ...selectedPlan.toDelete,
+        ...duplicates.where((file) => selectedDeletionPaths.add(file.path)),
+      ],
+      skipped: selectedPlan.skipped,
+    );
+  }
 }

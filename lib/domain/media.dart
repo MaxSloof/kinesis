@@ -4,6 +4,13 @@ enum MediaKind { jpeg, cr3, image, video }
 
 enum ReviewDecision { keepBoth, keepJpeg, keepCr3, deleteBoth }
 
+String _extensionOf(String name) {
+  final dot = name.lastIndexOf('.');
+  return dot < 0 || dot == name.length - 1
+      ? ''
+      : name.substring(dot + 1).toUpperCase();
+}
+
 class MediaFile {
   const MediaFile({
     required this.path,
@@ -44,11 +51,15 @@ class MediaFile {
 }
 
 class ReviewItem {
-  const ReviewItem({this.jpeg, this.cr3, this.single});
+  const ReviewItem({this.jpeg, this.cr3, this.single, this.existingJpeg});
 
   final MediaFile? jpeg;
   final MediaFile? cr3;
   final MediaFile? single;
+
+  /// A JPEG with the same shot name that already lives in the destination
+  /// library. It is only used for previewing, never imported or deleted.
+  final MediaFile? existingJpeg;
 
   bool get isPair => jpeg != null || cr3 != null;
 
@@ -58,6 +69,27 @@ class ReviewItem {
   List<MediaFile> get files =>
       [jpeg, cr3, single].whereType<MediaFile>().toList();
   String get label => files.map((file) => file.name).join(' + ');
+
+  ReviewItem withExistingJpeg(MediaFile? value) =>
+      ReviewItem(jpeg: jpeg, cr3: cr3, single: single, existingJpeg: value);
+
+  /// The shot's name without its extension, shared by both files of a pair.
+  String get displayName {
+    final name = files.first.name;
+    final dot = name.lastIndexOf('.');
+    return dot > 0 ? name.substring(0, dot) : name;
+  }
+
+  /// Compact format labels for the badge row, e.g. `JPEG` and `CR3` for a
+  /// pair, or the file extension for a single image or video.
+  List<String> get formats => [
+    if (jpeg != null) 'JPEG',
+    if (cr3 != null) 'CR3',
+    for (final file in files)
+      if (file.kind == MediaKind.image || file.kind == MediaKind.video)
+        _extensionOf(file.name),
+  ].where((format) => format.isNotEmpty).toList();
+
   DateTime? get captureDate =>
       jpeg?.captureDate ?? cr3?.captureDate ?? single?.captureDate;
   int? get sizeBytes {

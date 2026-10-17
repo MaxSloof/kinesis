@@ -495,6 +495,65 @@ class MediaService {
   File _libraryIndexFile(String library) =>
       File(path.join(library, '.kinesis', 'index.json'));
 
+  /// Lists JPEG files under [root] without reading EXIF. Used to match a RAW
+  /// on a source card with a JPEG that was already imported into the library.
+  Future<List<MediaFile>> listJpegs(String root) async {
+    if (!await Directory(root).exists()) return const [];
+    final files = await _libraryFiles(root);
+    return [
+      for (final file in files)
+        if (_isJpegPath(file.absolutePath))
+          MediaFile(
+            path: file.absolutePath,
+            kind: MediaKind.jpeg,
+            sizeBytes: file.size,
+          ),
+    ];
+  }
+
+  /// JPEGs in the destination index, keyed by lowercase shot name. Reading the
+  /// index avoids walking slow removable or network volumes again during a
+  /// source scan; falls back to [listJpegs] when no index is available.
+  Future<Map<String, MediaFile>> libraryJpegs(String root) async {
+    final index = _libraryIndexFile(root);
+    try {
+      if (await index.exists()) {
+        final decoded = jsonDecode(await index.readAsString());
+        if (decoded is Map<String, dynamic> &&
+            decoded['version'] == 2 &&
+            decoded['files'] is List<dynamic>) {
+          final jpegs = <String, MediaFile>{};
+          for (final value in decoded['files'] as List<dynamic>) {
+            if (value is! Map<String, dynamic>) continue;
+            final relative = value['path'];
+            final size = value['size'];
+            if (relative is! String || size is! int) continue;
+            if (!_isJpegPath(relative)) continue;
+            final absolute = path.normalize(path.join(root, relative));
+            final stem = path.basenameWithoutExtension(absolute).toLowerCase();
+            jpegs.putIfAbsent(
+              stem,
+              () => MediaFile(
+                path: absolute,
+                kind: MediaKind.jpeg,
+                sizeBytes: size,
+              ),
+            );
+          }
+          return jpegs;
+        }
+      }
+    } on Object catch (error) {
+      debugPrint('[scan] destination JPEG index read failed: $error');
+    }
+    return {for (final jpeg in await listJpegs(root)) jpeg.stem: jpeg};
+  }
+
+  static bool _isJpegPath(String filePath) {
+    final extension = path.extension(filePath).toLowerCase();
+    return extension == '.jpg' || extension == '.jpeg';
+  }
+
   Future<List<MediaFile>> listLibraryMedia(String library) async {
     final files = await _libraryFiles(library);
     files.sort((a, b) => a.path.compareTo(b.path));

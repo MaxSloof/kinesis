@@ -11,8 +11,10 @@ import 'package:path_provider/path_provider.dart';
 import 'domain/media.dart';
 import 'domain/selection.dart';
 import 'domain/view_options.dart';
+import 'services/cr3_preview.dart';
 import 'services/media_service.dart';
 import 'shortcuts.dart';
+import 'widgets/media_preview.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -275,12 +277,22 @@ class _KinesisHomeState extends State<KinesisHome> {
         '[scan] duplicate check: ${duplicateWatch.elapsedMilliseconds}ms, '
         '$duplicateCount exact duplicates',
       );
+      final jpegWatch = Stopwatch()..start();
+      final withLibraryJpegs = _attachLibraryJpegs(
+        marked,
+        await _libraryJpegs(),
+      );
+      debugPrint(
+        '[scan] destination JPEG matches: '
+        '${withLibraryJpegs.where((item) => item.existingJpeg != null).length} '
+        'in ${jpegWatch.elapsedMilliseconds}ms',
+      );
       if (mounted) {
         setState(() {
-          _items = marked;
+          _items = withLibraryJpegs;
           _decisions
             ..clear()
-            ..addAll(ImportPlanner.defaultDecisions(marked));
+            ..addAll(ImportPlanner.defaultDecisions(withLibraryJpegs));
           _autoDecisions
             ..clear()
             ..addAll(_decisions.keys);
@@ -367,7 +379,10 @@ class _KinesisHomeState extends State<KinesisHome> {
           }
         }
       }
-      final refreshed = await _media.markExisting(scanned, hashesBySize);
+      final refreshed = _attachLibraryJpegs(
+        await _media.markExisting(scanned, hashesBySize),
+        await _libraryJpegs(),
+      );
       if (!mounted || _source != source) return;
 
       final decisionsByPath = <String, ReviewDecision>{};
@@ -696,6 +711,39 @@ class _KinesisHomeState extends State<KinesisHome> {
     return path.joinAll([library, ...fixedParts]);
   }
 
+  /// JPEGs that already live in the destination, keyed by lowercase shot name.
+  /// A RAW on the source card can be paired with one of these for preview and
+  /// review context without importing the destination file again.
+  Future<Map<String, MediaFile>> _libraryJpegs() async {
+    final library = _library;
+    if (library == null) return const {};
+    final jpegRoot = _splitRawAndJpeg
+        ? _indexRoot(library, _jpegTemplate)
+        : _indexRoot(library, _template);
+    return _media.libraryJpegs(jpegRoot);
+  }
+
+  List<ReviewItem> _attachLibraryJpegs(
+    List<ReviewItem> items,
+    Map<String, MediaFile> jpegs,
+  ) {
+    if (jpegs.isEmpty) return items;
+    var changed = false;
+    final result = <ReviewItem>[];
+    for (final item in items) {
+      if (item.jpeg == null && item.cr3 != null) {
+        final match = jpegs[item.cr3!.stem];
+        if (match != null) {
+          result.add(item.withExistingJpeg(match));
+          changed = true;
+          continue;
+        }
+      }
+      result.add(item);
+    }
+    return changed ? result : items;
+  }
+
   @override
   Widget build(BuildContext context) => CallbackShortcuts(
     bindings: {
@@ -839,38 +887,59 @@ class _KinesisHomeState extends State<KinesisHome> {
               children: [
                 Card(
                   child: Center(
-                    child: preview == null
-                        ? Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(Icons.perm_media_outlined, size: 96),
-                              const SizedBox(height: 16),
-                              Text(item.label),
-                              Text(
-                                item.isPair
-                                    ? 'JPEG + CR3 pair'
-                                    : 'Preview unavailable',
-                              ),
-                            ],
-                          )
-                        : Image.file(
-                            File(preview.path),
-                            fit: BoxFit.contain,
-                            cacheWidth: 1600,
-                            gaplessPlayback: true,
-                            errorBuilder: (_, _, _) => Text(item.label),
-                          ),
+                    child: MediaPreview(
+                      preview: preview,
+                      cr3Path: item.cr3?.path,
+                      fit: BoxFit.contain,
+                      cacheWidth: 1600,
+                      loading: const Center(
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                      placeholder: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.perm_media_outlined, size: 96),
+                          const SizedBox(height: 16),
+                          Text(item.displayName),
+                          const Text('Preview unavailable'),
+                        ],
+                      ),
+                      errorPlaceholder: Text(item.displayName),
+                    ),
                   ),
                 ),
                 if (item.isDuplicate)
                   Positioned.fill(child: _duplicateOverlay()),
+                Positioned(left: 12, top: 12, child: _formatBadges(item)),
               ],
             ),
           ),
           const SizedBox(height: 16),
           _previewStrip(),
           const SizedBox(height: 12),
-          Text(item.label, textAlign: TextAlign.center),
+          Text(item.displayName, textAlign: TextAlign.center),
+          if (item.existingJpeg != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(
+                    Icons.library_add_check_outlined,
+                    size: 14,
+                    color: Theme.of(context).colorScheme.primary,
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    'JPEG already in library',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           const SizedBox(height: 4),
           Text(
             '${MediaViewOrder.captureDateLabel(item.captureDate)}  ·  '
@@ -923,20 +992,37 @@ class _KinesisHomeState extends State<KinesisHome> {
     for (final offset in const [1, -1, 2]) {
       final i = index + offset;
       if (i < 0 || i >= order.length) continue;
-      final preview = _previewFor(_items[order[i]]);
-      if (preview == null) continue;
-      unawaited(
-        precacheImage(
-          ResizeImage(FileImage(File(preview.path)), width: 1600),
-          context,
-          onError: (_, _) {},
-        ),
-      );
+      final item = _items[order[i]];
+      final preview = _previewFor(item);
+      if (preview != null) {
+        unawaited(
+          precacheImage(
+            ResizeImage(FileImage(File(preview.path)), width: 1600),
+            context,
+            onError: (_, _) {},
+          ),
+        );
+      } else if (item.cr3 != null) {
+        unawaited(
+          Cr3PreviewCache.instance.previewFor(item.cr3!.path).then((file) {
+            if (file == null || !mounted) return;
+            unawaited(
+              precacheImage(
+                ResizeImage(FileImage(file), width: 1600),
+                context,
+                onError: (_, _) {},
+              ),
+            );
+          }),
+        );
+      }
     }
   }
 
   MediaFile? _previewFor(ReviewItem item) =>
-      item.jpeg ?? (item.single?.kind == MediaKind.image ? item.single : null);
+      item.jpeg ??
+      item.existingJpeg ??
+      (item.single?.kind == MediaKind.image ? item.single : null);
 
   Widget _previewStrip() {
     final visibleOrder = _displayOrder;
@@ -983,16 +1069,17 @@ class _KinesisHomeState extends State<KinesisHome> {
                     ),
                     child: ClipRRect(
                       borderRadius: BorderRadius.circular(11),
-                      child: preview == null
-                          ? const Icon(Icons.perm_media_outlined)
-                          : Image.file(
-                              File(preview.path),
-                              fit: BoxFit.cover,
-                              cacheWidth: 216,
-                              gaplessPlayback: true,
-                              errorBuilder: (_, _, _) =>
-                                  const Icon(Icons.broken_image_outlined),
-                            ),
+                      child: MediaPreview(
+                        preview: preview,
+                        cr3Path: item.cr3?.path,
+                        fit: BoxFit.cover,
+                        cacheWidth: 216,
+                        placeholder: const Icon(Icons.perm_media_outlined),
+                        loading: const SizedBox.shrink(),
+                        errorPlaceholder: const Icon(
+                          Icons.broken_image_outlined,
+                        ),
+                      ),
                     ),
                   ),
                 ),
@@ -1185,25 +1272,17 @@ class _KinesisHomeState extends State<KinesisHome> {
         child: Stack(
           children: [
             Positioned.fill(
-              child: preview == null
-                  ? const Center(child: Icon(Icons.perm_media_outlined))
-                  : Image.file(
-                      File(preview.path),
-                      fit: BoxFit.cover,
-                      cacheWidth: 360,
-                      errorBuilder: (_, _, _) => const Center(
-                        child: Icon(Icons.broken_image_outlined),
-                      ),
-                    ),
-            ),
-            Positioned(
-              top: 6,
-              right: 6,
-              child: CircleAvatar(
-                radius: 13,
-                child: Icon(
-                  selected ? Icons.check : Icons.circle_outlined,
-                  size: 18,
+              child: MediaPreview(
+                preview: preview,
+                cr3Path: item.cr3?.path,
+                fit: BoxFit.cover,
+                cacheWidth: 360,
+                placeholder: const Center(
+                  child: Icon(Icons.perm_media_outlined),
+                ),
+                loading: const SizedBox.shrink(),
+                errorPlaceholder: const Center(
+                  child: Icon(Icons.broken_image_outlined),
                 ),
               ),
             ),
@@ -1223,7 +1302,7 @@ class _KinesisHomeState extends State<KinesisHome> {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       Text(
-                        item.label,
+                        item.displayName,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(color: Colors.white),
@@ -1240,13 +1319,33 @@ class _KinesisHomeState extends State<KinesisHome> {
                 ),
               ),
             ),
-            if (decision != null)
-              Positioned(
-                left: 6,
-                top: 6,
-                child: Chip(label: Text(_decisionLabel(decision))),
-              ),
             if (isDuplicate) Positioned.fill(child: _duplicateOverlay()),
+            Positioned(
+              left: 6,
+              top: 6,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _formatBadges(item),
+                  if (decision != null) ...[
+                    const SizedBox(height: 4),
+                    Chip(label: Text(_decisionLabel(decision))),
+                  ],
+                ],
+              ),
+            ),
+            Positioned(
+              top: 6,
+              right: 6,
+              child: CircleAvatar(
+                radius: 13,
+                child: Icon(
+                  selected ? Icons.check : Icons.circle_outlined,
+                  size: 18,
+                ),
+              ),
+            ),
           ],
         ),
       ),
@@ -1259,6 +1358,39 @@ class _KinesisHomeState extends State<KinesisHome> {
     ReviewDecision.keepCr3 => 'CR3',
     ReviewDecision.deleteBoth => 'Delete',
   };
+
+  Widget _formatBadges(ReviewItem item) {
+    final formats = item.formats;
+    final hasLibraryJpeg = item.existingJpeg != null;
+    if (formats.isEmpty && !hasLibraryJpeg) {
+      return const SizedBox.shrink();
+    }
+    final semantics = [
+      if (formats.isNotEmpty) 'Formats: ${formats.join(', ')}',
+      if (hasLibraryJpeg) 'JPEG already in library',
+    ].join('. ');
+    return Semantics(
+      label: semantics,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (var index = 0; index < formats.length; index++) ...[
+            if (index > 0) const SizedBox(width: 4),
+            _FormatBadge(label: formats[index]),
+          ],
+          if (hasLibraryJpeg) ...[
+            if (formats.isNotEmpty) const SizedBox(width: 4),
+            const _FormatBadge(
+              label: 'JPEG',
+              icon: Icons.check,
+              tooltip: 'JPEG already in library',
+              highlighted: true,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
 
   Widget _action(String key, String label, ReviewDecision decision) =>
       FilledButton.tonal(
@@ -1374,13 +1506,30 @@ class _KinesisHomeState extends State<KinesisHome> {
       };
     });
     await _saveSettings();
+    if (_source != null && !_scanning && !_ingesting) {
+      unawaited(_refreshSourceListing());
+    }
   }
 
   Future<void> _showLibrary() async {
     if (!mounted) return;
+    final library = _library;
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => LibraryPage(libraryPath: _library, media: _media),
+        builder: (_) => LibraryPage(
+          libraryPath: library,
+          media: _media,
+          jpegRoot: library == null
+              ? null
+              : _splitRawAndJpeg
+              ? _indexRoot(library, _jpegTemplate)
+              : library,
+          rawRoot: library == null
+              ? null
+              : _splitRawAndJpeg
+              ? _indexRoot(library, _cr3Template)
+              : library,
+        ),
       ),
     );
   }
@@ -1391,10 +1540,14 @@ class LibraryPage extends StatefulWidget {
     super.key,
     required this.libraryPath,
     required this.media,
+    this.jpegRoot,
+    this.rawRoot,
   });
 
   final String? libraryPath;
   final MediaService media;
+  final String? jpegRoot;
+  final String? rawRoot;
 
   @override
   State<LibraryPage> createState() => _LibraryPageState();
@@ -1496,13 +1649,40 @@ class _LibraryPageState extends State<LibraryPage> {
     }
   }
 
+  /// The path relative to [root], lowercased for case-insensitive cameras.
+  String? _relativeToRoot(String filePath, String? root) {
+    if (root == null) return null;
+    final normalizedRoot = path.normalize(root);
+    final normalizedFile = path.normalize(filePath);
+    if (!path.isWithin(normalizedRoot, normalizedFile)) return null;
+    return path
+        .withoutExtension(path.relative(normalizedFile, from: normalizedRoot))
+        .toLowerCase();
+  }
+
   @override
   Widget build(BuildContext context) {
     final assets = _orderedAssets;
-    final jpegPreviews = <String, MediaFile>{
-      for (final asset in assets)
-        if (asset.kind == MediaKind.jpeg) _pairKey(asset.path): asset,
-    };
+    final jpegByRelativePath = <String, MediaFile>{};
+    final jpegByDirStem = <String, MediaFile>{};
+    final jpegByStem = <String, MediaFile>{};
+    for (final asset in assets) {
+      if (asset.kind != MediaKind.jpeg) continue;
+      jpegByDirStem[_pairKey(asset.path)] = asset;
+      jpegByStem.putIfAbsent(asset.stem, () => asset);
+      final relative = _relativeToRoot(asset.path, widget.jpegRoot);
+      if (relative != null) jpegByRelativePath[relative] = asset;
+    }
+
+    MediaFile? previewFor(MediaFile asset) {
+      if (asset.kind != MediaKind.cr3) return asset;
+      final relative = _relativeToRoot(asset.path, widget.rawRoot);
+      final byPath = relative == null ? null : jpegByRelativePath[relative];
+      return byPath ??
+          jpegByDirStem[_pairKey(asset.path)] ??
+          jpegByStem[asset.stem];
+    }
+
     final groups = _groupByDate
         ? MediaViewOrder.groupByCaptureDate<MediaFile>(
             assets,
@@ -1589,7 +1769,7 @@ class _LibraryPageState extends State<LibraryPage> {
                         final asset = group.items[index];
                         final preview = switch (asset.kind) {
                           MediaKind.jpeg || MediaKind.image => asset,
-                          MediaKind.cr3 => jpegPreviews[_pairKey(asset.path)],
+                          MediaKind.cr3 => previewFor(asset),
                           MediaKind.video => null,
                         };
                         return Card(
@@ -1597,30 +1777,24 @@ class _LibraryPageState extends State<LibraryPage> {
                           child: Column(
                             children: [
                               Expanded(
-                                child: preview == null
-                                    ? const Center(
-                                        child: Icon(
-                                          Icons.perm_media_outlined,
-                                          size: 48,
-                                        ),
-                                      )
-                                    : Image.file(
-                                        File(preview.path),
-                                        fit: BoxFit.cover,
-                                        width: double.infinity,
-                                        cacheWidth: cacheWidth,
-                                        errorBuilder: (_, error, _) {
-                                          debugPrint(
-                                            '[library] thumbnail failed for '
-                                            '${preview.path}: $error',
-                                          );
-                                          return const Center(
-                                            child: Icon(
-                                              Icons.broken_image_outlined,
-                                            ),
-                                          );
-                                        },
-                                      ),
+                                child: MediaPreview(
+                                  preview: preview,
+                                  cr3Path: asset.kind == MediaKind.cr3
+                                      ? asset.path
+                                      : null,
+                                  fit: BoxFit.cover,
+                                  cacheWidth: cacheWidth,
+                                  placeholder: const Center(
+                                    child: Icon(
+                                      Icons.perm_media_outlined,
+                                      size: 48,
+                                    ),
+                                  ),
+                                  loading: const SizedBox.shrink(),
+                                  errorPlaceholder: const Center(
+                                    child: Icon(Icons.broken_image_outlined),
+                                  ),
+                                ),
                               ),
                               Padding(
                                 padding: const EdgeInsets.all(8),
@@ -1660,6 +1834,58 @@ class _LibraryPageState extends State<LibraryPage> {
   String _pairKey(String filePath) =>
       '${path.dirname(filePath).toLowerCase()}/'
       '${path.basenameWithoutExtension(filePath).toLowerCase()}';
+}
+
+/// A small, translucent label over a thumbnail, e.g. `JPEG` or `CR3`.
+class _FormatBadge extends StatelessWidget {
+  const _FormatBadge({
+    required this.label,
+    this.icon,
+    this.tooltip,
+    this.highlighted = false,
+  });
+
+  final String label;
+  final IconData? icon;
+  final String? tooltip;
+  final bool highlighted;
+
+  @override
+  Widget build(BuildContext context) {
+    final badge = DecoratedBox(
+      decoration: BoxDecoration(
+        color: highlighted
+            ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.86)
+            : Colors.black.withValues(alpha: 0.62),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: Colors.white30, width: 0.5),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (icon != null) ...[
+              Icon(icon, size: 10, color: Colors.white),
+              const SizedBox(width: 2),
+            ],
+            Text(
+              label,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.4,
+                height: 1.1,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    final message = tooltip;
+    return message == null ? badge : Tooltip(message: message, child: badge);
+  }
 }
 
 class _IngestProgress {

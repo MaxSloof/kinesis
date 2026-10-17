@@ -121,6 +121,45 @@ void main() {
     );
   });
 
+  test('review items expose a shared image name and format badges', () {
+    final jpeg = MediaFile(path: '/source/IMG_01.JPG', kind: MediaKind.jpeg);
+    final raw = MediaFile(path: '/source/IMG_01.CR3', kind: MediaKind.cr3);
+
+    final paired = ReviewItem(jpeg: jpeg, cr3: raw);
+    expect(paired.displayName, 'IMG_01');
+    expect(paired.formats, ['JPEG', 'CR3']);
+
+    final rawOnly = ReviewItem(cr3: raw);
+    expect(rawOnly.displayName, 'IMG_01');
+    expect(rawOnly.formats, ['CR3']);
+
+    final png = ReviewItem(
+      single: MediaFile(path: '/source/IMG_02.PNG', kind: MediaKind.image),
+    );
+    expect(png.displayName, 'IMG_02');
+    expect(png.formats, ['PNG']);
+  });
+
+  test('destination JPEG previews never join the import files', () {
+    final raw = MediaFile(
+      path: '/source/IMG_01.CR3',
+      kind: MediaKind.cr3,
+      sizeBytes: 900,
+    );
+    final destination = MediaFile(
+      path: '/library/JPEG/IMG_01.JPG',
+      kind: MediaKind.jpeg,
+      sizeBytes: 100,
+    );
+
+    final item = ReviewItem(cr3: raw).withExistingJpeg(destination);
+    expect(item.files, [raw]);
+    expect(item.sizeBytes, 900);
+    expect(item.formats, ['CR3']);
+    expect(item.existingJpeg, destination);
+    expect(item.isDuplicate, isFalse);
+  });
+
   test('model copies preserve scan metadata', () {
     final file = files.first;
     expect(file.withHash('hash').sizeBytes, file.sizeBytes);

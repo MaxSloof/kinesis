@@ -95,6 +95,27 @@ class _KinesisHomeState extends State<KinesisHome> {
   List<ReviewItem>? _displayOrderItems;
   MediaSortOrder? _displayOrderSort;
 
+  int get _duplicateCleanupCount =>
+      _items.where(ImportPlanner.needsDuplicateCleanup).length;
+
+  bool get _hasManualChoices =>
+      _decisions.keys.any((index) => !_autoDecisions.contains(index));
+
+  bool get _canRemoveDuplicates =>
+      _duplicateCleanupCount > 0 && !_hasManualChoices;
+
+  void _removeDuplicates() {
+    if (!_canRemoveDuplicates) return;
+    setState(() {
+      for (var index = 0; index < _items.length; index++) {
+        final item = _items[index];
+        if (!ImportPlanner.needsDuplicateCleanup(item)) continue;
+        _decisions[index] = ImportPlanner.duplicateCleanupDecision(item);
+        _autoDecisions.remove(index);
+      }
+    });
+  }
+
   List<int> get _displayOrder {
     if (_displayOrderCache == null ||
         !identical(_displayOrderItems, _items) ||
@@ -426,9 +447,12 @@ class _KinesisHomeState extends State<KinesisHome> {
           final wasAuto = refreshed[index].files.every(
             (file) => autoPaths.contains(file.path),
           );
-          // Do not keep a defaulted Delete both after the duplicate it was
-          // based on has disappeared from the library.
-          if (wasAuto && !refreshed[index].isDuplicate) continue;
+          // Do not keep a defaulted Delete both after the library match it was
+          // based on has disappeared.
+          if (wasAuto &&
+              !ImportPlanner.needsDuplicateCleanup(refreshed[index])) {
+            continue;
+          }
           preserved[index] = decision;
           if (wasAuto) preservedAuto.add(index);
         }
@@ -513,35 +537,58 @@ class _KinesisHomeState extends State<KinesisHome> {
         );
       },
     );
-    final duplicateItems = <int>{};
-    var duplicateFiles = 0;
-    for (final entry in _decisions.entries) {
-      if (entry.key >= _items.length) continue;
-      final item = _items[entry.key];
-      if (!item.isDuplicate) continue;
-      duplicateItems.add(entry.key);
-      duplicateFiles += item.files.where((file) => file.alreadyExists).length;
-    }
-    final duplicateSummary = duplicateItems.isEmpty
-        ? ''
-        : '$duplicateFiles ${duplicateFiles == 1 ? 'file' : 'files'} in '
-              '${duplicateItems.length} duplicate '
-              '${duplicateItems.length == 1 ? 'item' : 'items'} '
-              '${duplicateFiles == 1 ? 'is' : 'are'} already in the library and '
-              'will not be copied again.\n';
+    final unchangedFiles = <MediaFile>[
+      for (var index = 0; index < _items.length; index++)
+        if (!_decisions.containsKey(index)) ..._items[index].files,
+    ];
+    final alreadyInLibraryFiles = <MediaFile>[
+      for (final index in _decisions.keys)
+        if (index < _items.length)
+          ..._items[index].files.where((file) => file.alreadyExists),
+    ];
+    final duplicateFiles = alreadyInLibraryFiles.length;
+    final libraryJpegReferences = _decisions.keys
+        .where((index) => index < _items.length)
+        .where((index) => _items[index].existingJpeg != null)
+        .length;
     if (!mounted) return;
     final approved = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Confirm ingest plan'),
-        content: Text(
-          '${plan.toImport.length} new files will be copied and SHA-256 verified.\n'
-          '$duplicateSummary'
-          '${plan.toDelete.length} source files will move to Trash in total '
-          '(new copies, duplicates, and files marked for deletion).\n\n'
-          'Duplicate items default to Delete both; change a decision to import '
-          'instead.\n'
-          'Items with no decision are unchanged.',
+        content: SizedBox(
+          width: 720,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Only files in “Copy / verify candidates” can be written to '
+                  'the library. Source files listed for Trash are a separate '
+                  'action and move after copies are verified.',
+                ),
+                const SizedBox(height: 16),
+                _ingestPlanTable(plan, alreadyInLibraryFiles, unchangedFiles),
+                if (libraryJpegReferences > 0) ...[
+                  const SizedBox(height: 16),
+                  Text(
+                    '$libraryJpegReferences matching '
+                    '${libraryJpegReferences == 1 ? 'JPEG' : 'JPEGs'} in the '
+                    'library '
+                    '${libraryJpegReferences == 1 ? 'is' : 'are'} '
+                    'preview-only; they will not be copied or moved.',
+                  ),
+                ],
+                const SizedBox(height: 12),
+                const Text(
+                  'If multiple selected source files have identical content, '
+                  'only the first is copied; later copies are skipped. Files '
+                  'with no decision remain unchanged.',
+                ),
+              ],
+            ),
+          ),
         ),
         actions: [
           TextButton(
@@ -642,7 +689,9 @@ class _KinesisHomeState extends State<KinesisHome> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              'Ingest completed. ${skipped + duplicateFiles} duplicates skipped.',
+              'Ingest completed.'
+              '${skipped + duplicateFiles > 0 ? ' ${skipped + duplicateFiles} duplicate source files skipped.' : ''}'
+              '${libraryJpegReferences > 0 ? ' $libraryJpegReferences matching library JPEGs left unchanged.' : ''}',
             ),
           ),
         );
@@ -674,6 +723,77 @@ class _KinesisHomeState extends State<KinesisHome> {
       _sourceRefreshTimer?.cancel();
       await _refreshSourceListing();
     }
+  }
+
+  Widget _ingestPlanTable(
+    ImportPlan plan,
+    List<MediaFile> alreadyInLibraryFiles,
+    List<MediaFile> unchangedFiles,
+  ) {
+    final colors = Theme.of(context).colorScheme;
+
+    TableRow row(String action, List<MediaFile> files, {bool header = false}) {
+      final jpegCount = files
+          .where((file) => file.kind == MediaKind.jpeg)
+          .length;
+      final cr3Count = files.where((file) => file.kind == MediaKind.cr3).length;
+      final otherCount = files.length - jpegCount - cr3Count;
+      final values = header
+          ? [action, 'JPEG', 'CR3', 'Other', 'Total']
+          : [
+              action,
+              '$jpegCount',
+              '$cr3Count',
+              '$otherCount',
+              '${files.length}',
+            ];
+      return TableRow(
+        decoration: header
+            ? BoxDecoration(color: colors.surfaceContainerHighest)
+            : null,
+        children: [
+          for (var index = 0; index < values.length; index++)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+              child: index == 0
+                  ? Text(
+                      values[index],
+                      style: header
+                          ? Theme.of(context).textTheme.titleSmall
+                          : null,
+                    )
+                  : Align(
+                      alignment: Alignment.centerRight,
+                      child: Text(
+                        values[index],
+                        style: header
+                            ? Theme.of(context).textTheme.titleSmall
+                            : null,
+                      ),
+                    ),
+            ),
+        ],
+      );
+    }
+
+    return Table(
+      border: TableBorder.all(color: colors.outlineVariant),
+      columnWidths: const {
+        0: FlexColumnWidth(3),
+        1: FlexColumnWidth(1),
+        2: FlexColumnWidth(1),
+        3: FlexColumnWidth(1),
+        4: FlexColumnWidth(1),
+      },
+      defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+      children: [
+        row('Action', const [], header: true),
+        row('Copy / verify candidates', plan.toImport),
+        row('Already in library (not copied)', alreadyInLibraryFiles),
+        row('Move selected source files to Trash', plan.toDelete),
+        row('Leave unchanged', unchangedFiles),
+      ],
+    );
   }
 
   bool _progressOpen = false;
@@ -838,9 +958,24 @@ class _KinesisHomeState extends State<KinesisHome> {
         floatingActionButton: _items.isEmpty
             ? null
             : FloatingActionButton.extended(
-                onPressed: _decisions.isEmpty ? null : _confirm,
-                icon: const Icon(Icons.fact_check_outlined),
-                label: Text('Review plan (${_decisions.length})'),
+                onPressed: _canRemoveDuplicates
+                    ? _removeDuplicates
+                    : _decisions.isEmpty
+                    ? null
+                    : _confirm,
+                tooltip: _canRemoveDuplicates
+                    ? 'Skip JPEGs already in the library and keep missing CR3s'
+                    : 'Review ingest plan',
+                icon: Icon(
+                  _canRemoveDuplicates
+                      ? Icons.delete_sweep_outlined
+                      : Icons.fact_check_outlined,
+                ),
+                label: Text(
+                  _canRemoveDuplicates
+                      ? 'Remove duplicates ($_duplicateCleanupCount)'
+                      : 'Review plan (${_decisions.length})',
+                ),
               ),
       ),
     ),
@@ -1359,39 +1494,6 @@ class _KinesisHomeState extends State<KinesisHome> {
     ReviewDecision.deleteBoth => 'Delete',
   };
 
-  Widget _formatBadges(ReviewItem item) {
-    final formats = item.formats;
-    final hasLibraryJpeg = item.existingJpeg != null;
-    if (formats.isEmpty && !hasLibraryJpeg) {
-      return const SizedBox.shrink();
-    }
-    final semantics = [
-      if (formats.isNotEmpty) 'Formats: ${formats.join(', ')}',
-      if (hasLibraryJpeg) 'JPEG already in library',
-    ].join('. ');
-    return Semantics(
-      label: semantics,
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          for (var index = 0; index < formats.length; index++) ...[
-            if (index > 0) const SizedBox(width: 4),
-            _FormatBadge(label: formats[index]),
-          ],
-          if (hasLibraryJpeg) ...[
-            if (formats.isNotEmpty) const SizedBox(width: 4),
-            const _FormatBadge(
-              label: 'JPEG',
-              icon: Icons.check,
-              tooltip: 'JPEG already in library',
-              highlighted: true,
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
   Widget _action(String key, String label, ReviewDecision decision) =>
       FilledButton.tonal(
         onPressed: () => _decide(decision),
@@ -1578,8 +1680,56 @@ class _LibraryPageState extends State<LibraryPage> {
     super.dispose();
   }
 
-  List<MediaFile> get _orderedAssets =>
-      MediaViewOrder.sortFiles(_assets, _sortOrder);
+  List<ReviewItem> get _orderedItems {
+    final jpegByRelativePath = <String, MediaFile>{};
+    final jpegByDirStem = <String, MediaFile>{};
+    final jpegByStem = <String, MediaFile>{};
+    for (final asset in _assets) {
+      if (asset.kind != MediaKind.jpeg) continue;
+      jpegByDirStem.putIfAbsent(_pairKey(asset.path), () => asset);
+      jpegByStem.putIfAbsent(asset.stem, () => asset);
+      final relative = _relativeToRoot(asset.path, widget.jpegRoot);
+      if (relative != null) {
+        jpegByRelativePath.putIfAbsent(relative, () => asset);
+      }
+    }
+
+    final pairedJpegs = <String>{};
+    final items = <ReviewItem>[];
+    MediaFile? availableJpeg(Iterable<MediaFile?> candidates) {
+      for (final candidate in candidates) {
+        if (candidate != null && !pairedJpegs.contains(candidate.path)) {
+          return candidate;
+        }
+      }
+      return null;
+    }
+
+    for (final asset in _assets) {
+      if (asset.kind != MediaKind.cr3) continue;
+      final relative = _relativeToRoot(asset.path, widget.rawRoot);
+      final jpeg = availableJpeg([
+        if (relative != null) jpegByRelativePath[relative],
+        jpegByDirStem[_pairKey(asset.path)],
+        jpegByStem[asset.stem],
+      ]);
+      if (jpeg != null) pairedJpegs.add(jpeg.path);
+      items.add(ReviewItem(jpeg: jpeg, cr3: asset));
+    }
+
+    for (final asset in _assets) {
+      if (asset.kind == MediaKind.jpeg) {
+        if (!pairedJpegs.contains(asset.path)) {
+          items.add(ReviewItem(jpeg: asset));
+        }
+      } else if (asset.kind != MediaKind.cr3) {
+        items.add(ReviewItem(single: asset));
+      }
+    }
+
+    final order = MediaViewOrder.sortReviewItemIndices(items, _sortOrder);
+    return [for (final index in order) items[index]];
+  }
 
   Future<void> _watchLibrary() async {
     final library = widget.libraryPath;
@@ -1662,34 +1812,15 @@ class _LibraryPageState extends State<LibraryPage> {
 
   @override
   Widget build(BuildContext context) {
-    final assets = _orderedAssets;
-    final jpegByRelativePath = <String, MediaFile>{};
-    final jpegByDirStem = <String, MediaFile>{};
-    final jpegByStem = <String, MediaFile>{};
-    for (final asset in assets) {
-      if (asset.kind != MediaKind.jpeg) continue;
-      jpegByDirStem[_pairKey(asset.path)] = asset;
-      jpegByStem.putIfAbsent(asset.stem, () => asset);
-      final relative = _relativeToRoot(asset.path, widget.jpegRoot);
-      if (relative != null) jpegByRelativePath[relative] = asset;
-    }
-
-    MediaFile? previewFor(MediaFile asset) {
-      if (asset.kind != MediaKind.cr3) return asset;
-      final relative = _relativeToRoot(asset.path, widget.rawRoot);
-      final byPath = relative == null ? null : jpegByRelativePath[relative];
-      return byPath ??
-          jpegByDirStem[_pairKey(asset.path)] ??
-          jpegByStem[asset.stem];
-    }
+    final items = _orderedItems;
 
     final groups = _groupByDate
-        ? MediaViewOrder.groupByCaptureDate<MediaFile>(
-            assets,
-            (asset) => asset.captureDate,
+        ? MediaViewOrder.groupByCaptureDate<ReviewItem>(
+            items,
+            (item) => item.captureDate,
             newestFirst: _sortOrder != MediaSortOrder.captureOldest,
           )
-        : [MediaDateGroup(label: '', items: assets)];
+        : [MediaDateGroup(label: '', items: items)];
     final cacheWidth = (180 * MediaQuery.devicePixelRatioOf(context)).round();
     return Scaffold(
       appBar: AppBar(
@@ -1741,7 +1872,7 @@ class _LibraryPageState extends State<LibraryPage> {
           ? const Center(child: CircularProgressIndicator())
           : _error != null
           ? Center(child: Text(_error!))
-          : assets.isEmpty
+          : items.isEmpty
           ? const Center(child: Text('No media files in this library folder.'))
           : CustomScrollView(
               slivers: [
@@ -1766,34 +1897,43 @@ class _LibraryPageState extends State<LibraryPage> {
                             crossAxisSpacing: 12,
                           ),
                       delegate: SliverChildBuilderDelegate((_, index) {
-                        final asset = group.items[index];
-                        final preview = switch (asset.kind) {
-                          MediaKind.jpeg || MediaKind.image => asset,
-                          MediaKind.cr3 => previewFor(asset),
-                          MediaKind.video => null,
-                        };
+                        final item = group.items[index];
+                        final asset = item.single ?? item.jpeg ?? item.cr3!;
+                        final preview =
+                            item.jpeg ??
+                            (asset.kind == MediaKind.cr3 ? null : asset);
                         return Card(
                           clipBehavior: Clip.antiAlias,
                           child: Column(
                             children: [
                               Expanded(
-                                child: MediaPreview(
-                                  preview: preview,
-                                  cr3Path: asset.kind == MediaKind.cr3
-                                      ? asset.path
-                                      : null,
-                                  fit: BoxFit.cover,
-                                  cacheWidth: cacheWidth,
-                                  placeholder: const Center(
-                                    child: Icon(
-                                      Icons.perm_media_outlined,
-                                      size: 48,
+                                child: Stack(
+                                  fit: StackFit.expand,
+                                  children: [
+                                    MediaPreview(
+                                      preview: preview,
+                                      cr3Path: item.cr3?.path,
+                                      fit: BoxFit.cover,
+                                      cacheWidth: cacheWidth,
+                                      placeholder: const Center(
+                                        child: Icon(
+                                          Icons.perm_media_outlined,
+                                          size: 48,
+                                        ),
+                                      ),
+                                      loading: const SizedBox.shrink(),
+                                      errorPlaceholder: const Center(
+                                        child: Icon(
+                                          Icons.broken_image_outlined,
+                                        ),
+                                      ),
                                     ),
-                                  ),
-                                  loading: const SizedBox.shrink(),
-                                  errorPlaceholder: const Center(
-                                    child: Icon(Icons.broken_image_outlined),
-                                  ),
+                                    Positioned(
+                                      left: 8,
+                                      top: 8,
+                                      child: _formatBadges(item),
+                                    ),
+                                  ],
                                 ),
                               ),
                               Padding(
@@ -1803,13 +1943,15 @@ class _LibraryPageState extends State<LibraryPage> {
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
                                     Text(
-                                      path.basename(asset.path),
+                                      item.isPair
+                                          ? item.displayName
+                                          : path.basename(asset.path),
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                     ),
                                     Text(
-                                      '${MediaViewOrder.captureDateLabel(asset.captureDate)}  ·  '
-                                      '${MediaViewOrder.sizeLabel(asset.sizeBytes)}',
+                                      '${MediaViewOrder.captureDateLabel(item.captureDate)}  ·  '
+                                      '${MediaViewOrder.sizeLabel(item.sizeBytes)}',
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                       style: Theme.of(
@@ -1886,6 +2028,39 @@ class _FormatBadge extends StatelessWidget {
     final message = tooltip;
     return message == null ? badge : Tooltip(message: message, child: badge);
   }
+}
+
+Widget _formatBadges(ReviewItem item) {
+  final formats = item.formats;
+  final hasLibraryJpeg = item.existingJpeg != null;
+  if (formats.isEmpty && !hasLibraryJpeg) {
+    return const SizedBox.shrink();
+  }
+  final semantics = [
+    if (formats.isNotEmpty) 'Formats: ${formats.join(', ')}',
+    if (hasLibraryJpeg) 'JPEG already in library',
+  ].join('. ');
+  return Semantics(
+    label: semantics,
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (var index = 0; index < formats.length; index++) ...[
+          if (index > 0) const SizedBox(width: 4),
+          _FormatBadge(label: formats[index]),
+        ],
+        if (hasLibraryJpeg) ...[
+          if (formats.isNotEmpty) const SizedBox(width: 4),
+          const _FormatBadge(
+            label: 'JPEG',
+            icon: Icons.check,
+            tooltip: 'JPEG already in library',
+            highlighted: true,
+          ),
+        ],
+      ],
+    ),
+  );
 }
 
 class _IngestProgress {

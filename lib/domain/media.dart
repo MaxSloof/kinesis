@@ -114,11 +114,20 @@ class ImportPlan {
 class ImportPlanner {
   const ImportPlanner();
 
-  /// Default review decisions for a fresh scan: any item with a file already
-  /// in the library is treated as a duplicate and scheduled for deletion.
+  /// Items eligible for the duplicate-only review action. A matching library
+  /// JPEG is also relevant when reviewing a new CR3 that has no source JPEG.
+  static bool needsDuplicateCleanup(ReviewItem item) =>
+      item.isDuplicate || (item.existingJpeg != null && item.cr3 != null);
+
+  /// Duplicate cleanup defaults to deleting all source files for the item.
+  static ReviewDecision duplicateCleanupDecision(ReviewItem _) =>
+      ReviewDecision.deleteBoth;
+
+  /// Defaults duplicate source items to deletion. A library JPEG paired with
+  /// a source CR3 also counts: it indicates the shot was already reviewed.
   static Map<int, ReviewDecision> defaultDecisions(List<ReviewItem> items) => {
     for (var index = 0; index < items.length; index++)
-      if (items[index].isDuplicate) index: ReviewDecision.deleteBoth,
+      if (needsDuplicateCleanup(items[index])) index: ReviewDecision.deleteBoth,
   };
 
   ImportPlan plan(ReviewItem item, ReviewDecision decision) {
@@ -131,7 +140,7 @@ class ImportPlanner {
     return ImportPlan(
       toImport: selected.where((file) => !file.alreadyExists).toList(),
       toDelete: item.files,
-      skipped: const [],
+      skipped: selected.where((file) => file.alreadyExists).toList(),
     );
   }
 }

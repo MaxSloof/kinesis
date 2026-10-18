@@ -39,14 +39,16 @@ void main() {
         () => Future<void>.delayed(const Duration(milliseconds: 50)),
       );
       await tester.pump(const Duration(milliseconds: 50));
-      if (find.text('IMG_0001.CR3').evaluate().isNotEmpty) break;
+      if (find.text('IMG_0001').evaluate().isNotEmpty) break;
     }
     await tester.pump();
 
-    expect(find.text('IMG_0001.JPG'), findsOneWidget);
-    expect(find.text('IMG_0001.CR3'), findsOneWidget);
-    // One image for the JPEG tile and one for the CR3 tile using that JPEG.
-    expect(find.byType(Image), findsNWidgets(2));
+    expect(find.text('IMG_0001'), findsOneWidget);
+    expect(find.text('JPEG'), findsOneWidget);
+    expect(find.text('CR3'), findsOneWidget);
+    expect(find.textContaining('6 B'), findsOneWidget);
+    // The paired JPEG and CR3 appear together on one card and share one preview.
+    expect(find.byType(Image), findsOneWidget);
 
     await tester.runAsync(() => root.delete(recursive: true));
   });

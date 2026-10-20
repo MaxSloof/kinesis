@@ -15,16 +15,17 @@ tested so far; the other platforms are untested.
 
 ### Platform versions
 
-The current app version is **1.0.0** (build **1**) on each platform. These
-values come from `pubspec.yaml` and are used for all platform builds.
+The current app version is **0.1.0** (build **1**) on each platform. These
+values come from `pubspec.yaml` and are used for all platform builds. See
+[docs/releasing.md](docs/releasing.md) for the release process.
 
 | Platform | Version | Build |
 | --- | --- | --- |
-| Android | 1.0.0 | 1 (`versionCode`) |
-| iOS | 1.0.0 | 1 |
-| Linux | 1.0.0 | 1 |
-| macOS | 1.0.0 | 1 |
-| Windows | 1.0.0 | 1 |
+| Android | 0.1.0 | 1 (`versionCode`) |
+| iOS | 0.1.0 | 1 |
+| Linux | 0.1.0 | 1 |
+| macOS | 0.1.0 | 1 |
+| Windows | 0.1.0 | 1 |
 
 ## Features
 
@@ -101,9 +102,12 @@ flutter build linux  # Linux
 ## Using Kinesis
 
 1. Connect a camera card or other source drive, or choose a local source
-   folder. Kinesis scans it recursively.
+   folder. Kinesis scans it recursively. On Android, choose the folder in the
+   system folder picker; Kinesis uses the granted Storage Access Framework
+   access instead of raw `/storage/...` paths.
 2. Choose a destination library folder with **Set library**. The library can
-   be on a local or mounted volume.
+   be on a local or mounted volume. Android asks for a separate folder grant;
+   the grant is retained across launches.
 3. Review the scanned items. Use the single-image view to step through items,
    or switch to grid view to select several items and apply one decision to
    them together.
@@ -173,17 +177,19 @@ the plan before confirming, and keep another backup of important media.
 
 Kinesis uses the system Trash where available. If that fails, it places files
 in a `.kinesis-trash/<date>/` holding folder on the source volume, preserving
-their relative paths. This fallback is not the same as permanent deletion;
-you can inspect that folder and restore files manually.
+their relative paths. Android's Storage Access Framework does not expose a
+system Trash operation, so Android always uses this holding folder. This is
+not permanent deletion; you can inspect that folder and restore files manually.
 
 ## Local data
 
 Kinesis stores settings and its app-level record of imported assets in the
 operating system's application-support directory. It also maintains a
 `.kinesis/index.json` hash index in the library to speed up duplicate checks;
-this index is rebuildable from the media files. Media remains in the folders
-you choose—Kinesis does not require a separate cloud service or proprietary
-library database.
+this index is rebuildable from the media files. Android currently calculates
+library hashes through the selected folder grant rather than creating that
+index. Media remains in the folders you choose—Kinesis does not require a
+separate cloud service or proprietary library database.
 
 ## Development
 

@@ -1398,11 +1398,15 @@ class _KinesisHomeState extends State<KinesisHome> {
             separatorBuilder: (_, _) => const SizedBox(width: 8),
             itemBuilder: (_, stripIndex) {
               final index = first + stripIndex;
-              final item = _items[visibleOrder[index]];
+              final itemIndex = visibleOrder[index];
+              final item = _items[itemIndex];
+              final decision = _decisions[itemIndex];
               final preview = _previewFor(item);
               return Semantics(
                 button: true,
-                label: 'Show image ${index + 1}',
+                label:
+                    'Show image ${index + 1}'
+                    '${decision == null ? '' : ', selected action: ${_selectedActionLabel(decision)}'}',
                 child: InkWell(
                   onTap: () {
                     setState(() => _current = index);
@@ -1422,22 +1426,68 @@ class _KinesisHomeState extends State<KinesisHome> {
                     ),
                     child: ClipRRect(
                       borderRadius: BorderRadius.circular(11),
-                      child: MediaPreview(
-                        preview: preview,
-                        cr3Path: item.cr3?.path,
-                        fit: BoxFit.cover,
-                        cacheWidth: 216,
-                        placeholder: const Icon(Icons.perm_media_outlined),
-                        loading: const SizedBox.shrink(),
-                        errorPlaceholder: const Icon(
-                          Icons.broken_image_outlined,
-                        ),
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          MediaPreview(
+                            preview: preview,
+                            cr3Path: item.cr3?.path,
+                            fit: BoxFit.cover,
+                            cacheWidth: 216,
+                            placeholder: const Icon(Icons.perm_media_outlined),
+                            loading: const SizedBox.shrink(),
+                            errorPlaceholder: const Icon(
+                              Icons.broken_image_outlined,
+                            ),
+                          ),
+                          if (decision != null)
+                            Positioned(
+                              left: 3,
+                              right: 3,
+                              bottom: 3,
+                              child: _thumbnailActionBadge(decision),
+                            ),
+                        ],
                       ),
                     ),
                   ),
                 ),
               );
             },
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _thumbnailActionBadge(ReviewDecision decision) {
+    final colors = Theme.of(context).colorScheme;
+    final isDelete = decision == ReviewDecision.deleteBoth;
+    final background = isDelete
+        ? colors.errorContainer
+        : colors.primaryContainer;
+    final foreground = isDelete
+        ? colors.onErrorContainer
+        : colors.onPrimaryContainer;
+
+    return Tooltip(
+      message: 'Selected action: ${_selectedActionLabel(decision)}',
+      child: Material(
+        color: background,
+        elevation: 3,
+        borderRadius: BorderRadius.circular(6),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+          child: Text(
+            _selectedActionLabel(decision),
+            maxLines: 1,
+            textAlign: TextAlign.center,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              color: foreground,
+              fontSize: 9,
+              fontWeight: FontWeight.w700,
+            ),
           ),
         ),
       ),

@@ -964,85 +964,97 @@ class _KinesisHomeState extends State<KinesisHome> {
                 ),
               ),
               const SizedBox(width: 10),
-              const Text('Kinesis'),
+              const Flexible(
+                child: Text(
+                  'Kinesis',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
             ],
           ),
-          actions: [
-            IconButton(
-              onPressed: _openHelp,
-              icon: const Icon(Icons.help_outline),
-              tooltip: 'Help',
-            ),
-            IconButton(
-              onPressed: _showSettings,
-              icon: const Icon(Icons.settings_outlined),
-              tooltip: 'Settings',
-            ),
-            IconButton(
-              onPressed: _showLibrary,
-              icon: const Icon(Icons.photo_library_outlined),
-              tooltip: 'Library',
-            ),
-            if (_items.isNotEmpty) ...[
-              IconButton(
-                onPressed: () => setState(() {
-                  _gridMode = !_gridMode;
-                  _selection.clear();
-                }),
-                icon: Icon(
-                  _gridMode
-                      ? Icons.fullscreen_outlined
-                      : Icons.grid_view_outlined,
-                ),
-                tooltip: _gridMode ? 'Single image review' : 'Grid review',
-              ),
-              PopupMenuButton<MediaSortOrder>(
-                tooltip: 'Sort ingest review',
-                icon: const Icon(Icons.sort),
-                onSelected: _changeSortOrder,
-                itemBuilder: (context) => const [
-                  PopupMenuItem(
-                    value: MediaSortOrder.nameAscending,
-                    child: Text('Name (A–Z)'),
+          actions: MediaQuery.sizeOf(context).width < 700
+              ? _compactAppBarActions()
+              : [
+                  IconButton(
+                    onPressed: _openHelp,
+                    icon: const Icon(Icons.help_outline),
+                    tooltip: 'Help',
                   ),
-                  PopupMenuItem(
-                    value: MediaSortOrder.nameDescending,
-                    child: Text('Name (Z–A)'),
+                  IconButton(
+                    onPressed: _showSettings,
+                    icon: const Icon(Icons.settings_outlined),
+                    tooltip: 'Settings',
                   ),
-                  PopupMenuItem(
-                    value: MediaSortOrder.captureNewest,
-                    child: Text('Capture date (newest)'),
+                  IconButton(
+                    onPressed: _showLibrary,
+                    icon: const Icon(Icons.photo_library_outlined),
+                    tooltip: 'Library',
                   ),
-                  PopupMenuItem(
-                    value: MediaSortOrder.captureOldest,
-                    child: Text('Capture date (oldest)'),
-                  ),
-                  PopupMenuItem(
-                    value: MediaSortOrder.sizeLargest,
-                    child: Text('File size (largest)'),
-                  ),
-                  PopupMenuItem(
-                    value: MediaSortOrder.sizeSmallest,
-                    child: Text('File size (smallest)'),
+                  if (_items.isNotEmpty) ...[
+                    IconButton(
+                      onPressed: () => setState(() {
+                        _gridMode = !_gridMode;
+                        _selection.clear();
+                      }),
+                      icon: Icon(
+                        _gridMode
+                            ? Icons.fullscreen_outlined
+                            : Icons.grid_view_outlined,
+                      ),
+                      tooltip: _gridMode
+                          ? 'Single image review'
+                          : 'Grid review',
+                    ),
+                    PopupMenuButton<MediaSortOrder>(
+                      tooltip: 'Sort ingest review',
+                      icon: const Icon(Icons.sort),
+                      onSelected: _changeSortOrder,
+                      itemBuilder: (context) => const [
+                        PopupMenuItem(
+                          value: MediaSortOrder.nameAscending,
+                          child: Text('Name (A–Z)'),
+                        ),
+                        PopupMenuItem(
+                          value: MediaSortOrder.nameDescending,
+                          child: Text('Name (Z–A)'),
+                        ),
+                        PopupMenuItem(
+                          value: MediaSortOrder.captureNewest,
+                          child: Text('Capture date (newest)'),
+                        ),
+                        PopupMenuItem(
+                          value: MediaSortOrder.captureOldest,
+                          child: Text('Capture date (oldest)'),
+                        ),
+                        PopupMenuItem(
+                          value: MediaSortOrder.sizeLargest,
+                          child: Text('File size (largest)'),
+                        ),
+                        PopupMenuItem(
+                          value: MediaSortOrder.sizeSmallest,
+                          child: Text('File size (smallest)'),
+                        ),
+                      ],
+                    ),
+                    IconButton(
+                      onPressed: _toggleDateGrouping,
+                      icon: Icon(
+                        _groupByDate
+                            ? Icons.calendar_month
+                            : Icons.calendar_month_outlined,
+                      ),
+                      tooltip: _groupByDate ? 'Ungroup dates' : 'Group by date',
+                    ),
+                  ],
+                  TextButton.icon(
+                    onPressed: _chooseLibrary,
+                    icon: const Icon(Icons.folder_outlined),
+                    label: Text(
+                      _library == null ? 'Set library' : 'Library set',
+                    ),
                   ),
                 ],
-              ),
-              IconButton(
-                onPressed: _toggleDateGrouping,
-                icon: Icon(
-                  _groupByDate
-                      ? Icons.calendar_month
-                      : Icons.calendar_month_outlined,
-                ),
-                tooltip: _groupByDate ? 'Ungroup dates' : 'Group by date',
-              ),
-            ],
-            TextButton.icon(
-              onPressed: _chooseLibrary,
-              icon: const Icon(Icons.folder_outlined),
-              label: Text(_library == null ? 'Set library' : 'Library set'),
-            ),
-          ],
         ),
         body: _items.isEmpty
             ? _welcome()
@@ -1072,6 +1084,74 @@ class _KinesisHomeState extends State<KinesisHome> {
       ),
     ),
   );
+
+  List<Widget> _compactAppBarActions() => [
+    IconButton(
+      onPressed: _openHelp,
+      icon: const Icon(Icons.help_outline),
+      tooltip: 'Help',
+    ),
+    PopupMenuButton<String>(
+      tooltip: 'More options',
+      icon: const Icon(Icons.more_vert),
+      onSelected: (action) {
+        switch (action) {
+          case 'settings':
+            _showSettings();
+          case 'library':
+            _showLibrary();
+          case 'chooseLibrary':
+            _chooseLibrary();
+          case 'toggleGrid':
+            setState(() {
+              _gridMode = !_gridMode;
+              _selection.clear();
+            });
+          case 'toggleDateGrouping':
+            _toggleDateGrouping();
+          default:
+            if (action.startsWith('sort:')) {
+              _changeSortOrder(
+                MediaSortOrder.values.byName(action.substring('sort:'.length)),
+              );
+            }
+        }
+      },
+      itemBuilder: (context) => [
+        PopupMenuItem(
+          value: 'chooseLibrary',
+          child: Text(_library == null ? 'Set library' : 'Change library'),
+        ),
+        const PopupMenuItem(value: 'library', child: Text('Open library')),
+        const PopupMenuItem(value: 'settings', child: Text('Settings')),
+        if (_items.isNotEmpty) ...[
+          PopupMenuItem(
+            value: 'toggleGrid',
+            child: Text(_gridMode ? 'Single image review' : 'Grid review'),
+          ),
+          PopupMenuItem(
+            value: 'toggleDateGrouping',
+            child: Text(_groupByDate ? 'Ungroup dates' : 'Group by date'),
+          ),
+          const PopupMenuDivider(),
+          for (final order in MediaSortOrder.values)
+            PopupMenuItem(
+              value: 'sort:${order.name}',
+              child: Text(_sortOrderLabel(order)),
+            ),
+        ],
+      ],
+    ),
+  ];
+
+  String _sortOrderLabel(MediaSortOrder order) => switch (order) {
+    MediaSortOrder.nameAscending => 'Name (A–Z)',
+    MediaSortOrder.nameDescending => 'Name (Z–A)',
+    MediaSortOrder.captureNewest => 'Capture date (newest)',
+    MediaSortOrder.captureOldest => 'Capture date (oldest)',
+    MediaSortOrder.sizeLargest => 'File size (largest)',
+    MediaSortOrder.sizeSmallest => 'File size (smallest)',
+  };
 
   Widget _welcome() => Center(
     child: Column(

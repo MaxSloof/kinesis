@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="Kinesis logo" width="160">
+  <img src="kinesis_v1.svg" alt="Kinesis logo" width="160">
 </p>
 
 # Kinesis

@@ -1,9 +1,11 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
 import '../domain/media.dart';
 import '../services/cr3_preview.dart';
+import '../services/saf_storage.dart';
 
 /// Renders a media thumbnail, falling back to the JPEG preview embedded in a
 /// CR3 when no paired JPEG exists.
@@ -37,6 +39,7 @@ class MediaPreview extends StatefulWidget {
 
 class _MediaPreviewState extends State<MediaPreview> {
   Future<File?>? _cr3Future;
+  Future<Uint8List?>? _safThumbnailFuture;
 
   @override
   void initState() {
@@ -54,6 +57,10 @@ class _MediaPreviewState extends State<MediaPreview> {
   }
 
   void _start() {
+    _safThumbnailFuture =
+        widget.preview != null && SafStorage.isUri(widget.preview!.path)
+        ? SafStorage.instance.thumbnail(widget.preview!.path)
+        : null;
     _cr3Future = widget.preview == null && widget.cr3Path != null
         ? Cr3PreviewCache.instance.previewFor(widget.cr3Path!)
         : null;
@@ -61,7 +68,31 @@ class _MediaPreviewState extends State<MediaPreview> {
 
   @override
   Widget build(BuildContext context) {
-    if (widget.preview != null) return _image(widget.preview!.path);
+    if (widget.preview != null) {
+      final thumbnail = _safThumbnailFuture;
+      if (thumbnail == null) return _image(widget.preview!.path);
+      return FutureBuilder<Uint8List?>(
+        future: thumbnail,
+        builder: (context, snapshot) {
+          final bytes = snapshot.data;
+          if (bytes == null) {
+            return snapshot.connectionState == ConnectionState.waiting
+                ? widget.loading ?? widget.placeholder
+                : widget.errorPlaceholder ?? widget.placeholder;
+          }
+          return Image.memory(
+            bytes,
+            fit: widget.fit,
+            width: double.infinity,
+            height: double.infinity,
+            cacheWidth: widget.cacheWidth,
+            gaplessPlayback: true,
+            errorBuilder: (_, _, _) =>
+                widget.errorPlaceholder ?? widget.placeholder,
+          );
+        },
+      );
+    }
     final future = _cr3Future;
     if (future == null) return widget.placeholder;
     return FutureBuilder<File?>(

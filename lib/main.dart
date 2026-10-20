@@ -15,6 +15,7 @@ import 'domain/selection.dart';
 import 'domain/view_options.dart';
 import 'services/cr3_preview.dart';
 import 'services/media_service.dart';
+import 'services/saf_storage.dart';
 import 'shortcuts.dart';
 import 'widgets/media_preview.dart';
 
@@ -88,6 +89,7 @@ class _KinesisHomeState extends State<KinesisHome> {
     ReviewDecision.deleteBoth: 'F',
   };
   int _current = 0;
+  final _previewStripController = ScrollController();
   final _zoomController = TransformationController();
   Size _viewSize = Size.zero;
   int? _zoomedItem;
@@ -116,6 +118,7 @@ class _KinesisHomeState extends State<KinesisHome> {
   void dispose() {
     _sourceRefreshTimer?.cancel();
     _sourceWatch?.cancel();
+    _previewStripController.dispose();
     _zoomController.dispose();
     super.dispose();
   }
@@ -200,7 +203,13 @@ class _KinesisHomeState extends State<KinesisHome> {
     if (!mounted) return;
     setState(() {
       _store = store;
-      _library = state['library'] as String?;
+      final savedLibrary = state['library'] as String?;
+      _library =
+          Platform.isAndroid &&
+              savedLibrary != null &&
+              !SafStorage.isUri(savedLibrary)
+          ? null
+          : savedLibrary;
       _template = state['template'] as String? ?? _template;
       _splitRawAndJpeg = state['splitRawAndJpeg'] as bool? ?? false;
       _vimKeys = state['vimKeys'] as bool? ?? true;
@@ -243,6 +252,8 @@ class _KinesisHomeState extends State<KinesisHome> {
       await _saveSettings();
     } on FileSystemException {
       // Library access can be unavailable when a removable volume is absent.
+    } on Object catch (error) {
+      debugPrint('[library] index refresh failed: $error');
     }
   }
 
@@ -264,9 +275,11 @@ class _KinesisHomeState extends State<KinesisHome> {
       Future.value();
 
   Future<void> _chooseLibrary() async {
-    final selected = await FilePicker.platform.getDirectoryPath(
-      dialogTitle: 'Choose your Kinesis media library',
-    );
+    final selected = Platform.isAndroid
+        ? await SafStorage.instance.pickDirectory(initialUri: _library)
+        : await FilePicker.platform.getDirectoryPath(
+            dialogTitle: 'Choose your Kinesis media library',
+          );
     if (selected == null) return;
     final changed = selected != _library;
     setState(() {
@@ -284,9 +297,11 @@ class _KinesisHomeState extends State<KinesisHome> {
   }
 
   Future<void> _chooseSource() async {
-    final selected = await FilePicker.platform.getDirectoryPath(
-      dialogTitle: 'Choose a camera card or source folder',
-    );
+    final selected = Platform.isAndroid
+        ? await SafStorage.instance.pickDirectory(initialUri: _source)
+        : await FilePicker.platform.getDirectoryPath(
+            dialogTitle: 'Choose a camera card or source folder',
+          );
     if (selected == null) return;
     final previousSource = _source;
     _source = selected;
@@ -399,6 +414,7 @@ class _KinesisHomeState extends State<KinesisHome> {
     _sourceWatch = null;
     await previousWatch?.cancel();
     _source = source;
+    if (SafStorage.isUri(source)) return;
     try {
       _sourceWatch = Directory(source)
           .watch(recursive: true)
@@ -536,6 +552,8 @@ class _KinesisHomeState extends State<KinesisHome> {
             : _current.clamp(0, refreshed.length - 1).toInt();
       });
     } on FileSystemException catch (error) {
+      debugPrint('[scan] source refresh failed: $error');
+    } on Object catch (error) {
       debugPrint('[scan] source refresh failed: $error');
     } finally {
       _refreshingSource = false;
@@ -687,12 +705,12 @@ class _KinesisHomeState extends State<KinesisHome> {
           phase: 'Copying and verifying',
           done: stepsDone,
           total: totalSteps,
-          currentFile: path.basename(file.path),
+          currentFile: file.name,
         );
         final sourceHash = await _media.hashFile(file.path);
         if (!knownHashes.add(sourceHash)) {
           skipped++;
-          step('Copying and verifying', path.basename(file.path));
+          step('Copying and verifying', file.name);
           continue;
         }
         importedAssets.add(
@@ -702,7 +720,7 @@ class _KinesisHomeState extends State<KinesisHome> {
             _templateFor(file),
           ),
         );
-        step('Copying and verifying', path.basename(file.path));
+        step('Copying and verifying', file.name);
       }
       progress.value = _IngestProgress(
         phase: 'Updating library index',
@@ -723,12 +741,10 @@ class _KinesisHomeState extends State<KinesisHome> {
           phase: 'Moving sources to Trash',
           done: stepsDone,
           total: totalSteps,
-          currentFile: path.basename(file.path),
+          currentFile: file.name,
         );
-        if (await File(file.path).exists()) {
-          await _trash.moveToTrash(file.path);
-        }
-        step('Moving sources to Trash', path.basename(file.path));
+        await _trash.moveToTrash(file);
+        step('Moving sources to Trash', file.name);
       }
       _closeProgress(dialogClosed);
       if (mounted) {
@@ -759,6 +775,13 @@ class _KinesisHomeState extends State<KinesisHome> {
             ),
           ),
         );
+      }
+    } on Object catch (error) {
+      _closeProgress(dialogClosed);
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Ingest stopped: $error')));
       }
     } finally {
       _closeProgress(dialogClosed);
@@ -860,7 +883,9 @@ class _KinesisHomeState extends State<KinesisHome> {
   }
 
   Iterable<String> _indexRoots(String library) => {
-    if (_splitRawAndJpeg) ...[
+    if (SafStorage.isUri(library))
+      library
+    else if (_splitRawAndJpeg) ...[
       _indexRoot(library, _jpegTemplate),
       _indexRoot(library, _cr3Template),
     ] else
@@ -868,6 +893,7 @@ class _KinesisHomeState extends State<KinesisHome> {
   };
 
   String _indexRoot(String library, String template) {
+    if (SafStorage.isUri(library)) return library;
     final parts = path.split(template);
     final fixedParts = <String>[];
     for (final part in parts) {
@@ -1447,7 +1473,7 @@ class _KinesisHomeState extends State<KinesisHome> {
       if (i < 0 || i >= order.length) continue;
       final item = _items[order[i]];
       final preview = _previewFor(item);
-      if (preview != null) {
+      if (preview != null && !SafStorage.isUri(preview.path)) {
         unawaited(
           precacheImage(
             ResizeImage(FileImage(File(preview.path)), width: 1600),
@@ -1479,6 +1505,42 @@ class _KinesisHomeState extends State<KinesisHome> {
 
   Widget _previewStrip() {
     final visibleOrder = _displayOrder;
+    final isCompact = MediaQuery.sizeOf(context).width < 700;
+    if (isCompact) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!_previewStripController.hasClients) return;
+        const tileWidth = 88.0;
+        const spacing = 8.0;
+        final position = _previewStripController.position;
+        final target =
+            (_current * (tileWidth + spacing) +
+                    tileWidth / 2 -
+                    position.viewportDimension / 2)
+                .clamp(0.0, position.maxScrollExtent);
+        if ((position.pixels - target).abs() > 1) {
+          _previewStripController.animateTo(
+            target,
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOut,
+          );
+        }
+      });
+      return SizedBox(
+        height: 76,
+        child: ListView.separated(
+          controller: _previewStripController,
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          itemCount: visibleOrder.length,
+          separatorBuilder: (_, _) => const SizedBox(width: 8),
+          itemBuilder: (_, index) => SizedBox(
+            width: 88,
+            child: _previewStripTile(index, visibleOrder),
+          ),
+        ),
+      );
+    }
+
     const window = 7;
     final count = visibleOrder.length;
     final first = (_current - 3)
@@ -1496,64 +1558,64 @@ class _KinesisHomeState extends State<KinesisHome> {
             physics: const NeverScrollableScrollPhysics(),
             itemCount: shown,
             separatorBuilder: (_, _) => const SizedBox(width: 8),
-            itemBuilder: (_, stripIndex) {
-              final index = first + stripIndex;
-              final itemIndex = visibleOrder[index];
-              final item = _items[itemIndex];
-              final decision = _decisions[itemIndex];
-              final preview = _previewFor(item);
-              return Semantics(
-                button: true,
-                label:
-                    'Show image ${index + 1}'
-                    '${decision == null ? '' : ', selected action: ${_selectedActionLabel(decision)}'}',
-                child: InkWell(
-                  onTap: () {
-                    setState(() => _current = index);
-                    _prefetchAround(index);
-                  },
-                  borderRadius: BorderRadius.circular(12),
-                  child: Ink(
-                    width: 108,
-                    decoration: BoxDecoration(
-                      border: Border.all(
-                        color: index == _current
-                            ? Theme.of(context).colorScheme.primary
-                            : Theme.of(context).colorScheme.outlineVariant,
-                        width: index == _current ? 2 : 1,
-                      ),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(11),
-                      child: Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          MediaPreview(
-                            preview: preview,
-                            cr3Path: item.cr3?.path,
-                            fit: BoxFit.cover,
-                            cacheWidth: 216,
-                            placeholder: const Icon(Icons.perm_media_outlined),
-                            loading: const SizedBox.shrink(),
-                            errorPlaceholder: const Icon(
-                              Icons.broken_image_outlined,
-                            ),
-                          ),
-                          if (decision != null)
-                            Positioned(
-                              left: 3,
-                              right: 3,
-                              bottom: 3,
-                              child: _thumbnailActionBadge(decision),
-                            ),
-                        ],
-                      ),
-                    ),
-                  ),
+            itemBuilder: (_, stripIndex) =>
+                _previewStripTile(first + stripIndex, visibleOrder),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _previewStripTile(int index, List<int> visibleOrder) {
+    final itemIndex = visibleOrder[index];
+    final item = _items[itemIndex];
+    final decision = _decisions[itemIndex];
+    final preview = _previewFor(item);
+    return Semantics(
+      button: true,
+      label:
+          'Show image ${index + 1}'
+          '${decision == null ? '' : ', selected action: ${_selectedActionLabel(decision)}'}',
+      child: InkWell(
+        onTap: () {
+          setState(() => _current = index);
+          _prefetchAround(index);
+        },
+        borderRadius: BorderRadius.circular(12),
+        child: Ink(
+          width: MediaQuery.sizeOf(context).width < 700 ? 88 : 108,
+          decoration: BoxDecoration(
+            border: Border.all(
+              color: index == _current
+                  ? Theme.of(context).colorScheme.primary
+                  : Theme.of(context).colorScheme.outlineVariant,
+              width: index == _current ? 2 : 1,
+            ),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(11),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                MediaPreview(
+                  preview: preview,
+                  cr3Path: item.cr3?.path,
+                  fit: BoxFit.cover,
+                  cacheWidth: 216,
+                  placeholder: const Icon(Icons.perm_media_outlined),
+                  loading: const SizedBox.shrink(),
+                  errorPlaceholder: const Icon(Icons.broken_image_outlined),
                 ),
-              );
-            },
+                if (decision != null)
+                  Positioned(
+                    left: 3,
+                    right: 3,
+                    bottom: 3,
+                    child: _thumbnailActionBadge(decision),
+                  ),
+              ],
+            ),
           ),
         ),
       ),
@@ -2183,9 +2245,9 @@ class _LibraryPageState extends State<LibraryPage> {
     final jpegByStem = <String, MediaFile>{};
     for (final asset in _assets) {
       if (asset.kind != MediaKind.jpeg) continue;
-      jpegByDirStem.putIfAbsent(_pairKey(asset.path), () => asset);
+      jpegByDirStem.putIfAbsent(_pairKey(asset), () => asset);
       jpegByStem.putIfAbsent(asset.stem, () => asset);
-      final relative = _relativeToRoot(asset.path, widget.jpegRoot);
+      final relative = _relativeToRoot(asset, widget.jpegRoot);
       if (relative != null) {
         jpegByRelativePath.putIfAbsent(relative, () => asset);
       }
@@ -2204,10 +2266,10 @@ class _LibraryPageState extends State<LibraryPage> {
 
     for (final asset in _assets) {
       if (asset.kind != MediaKind.cr3) continue;
-      final relative = _relativeToRoot(asset.path, widget.rawRoot);
+      final relative = _relativeToRoot(asset, widget.rawRoot);
       final jpeg = availableJpeg([
         if (relative != null) jpegByRelativePath[relative],
-        jpegByDirStem[_pairKey(asset.path)],
+        jpegByDirStem[_pairKey(asset)],
         jpegByStem[asset.stem],
       ]);
       if (jpeg != null) pairedJpegs.add(jpeg.path);
@@ -2230,7 +2292,10 @@ class _LibraryPageState extends State<LibraryPage> {
 
   Future<void> _watchLibrary() async {
     final library = widget.libraryPath;
-    if (library == null || !await Directory(library).exists() || !mounted) {
+    if (library == null ||
+        SafStorage.isUri(library) ||
+        !await Directory(library).exists() ||
+        !mounted) {
       return;
     }
     try {
@@ -2287,6 +2352,14 @@ class _LibraryPageState extends State<LibraryPage> {
           _error = 'Could not read the selected library folder.';
         });
       }
+    } on Object catch (error) {
+      debugPrint('[library] scan failed: $error');
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _error = 'Could not read the selected library folder: $error';
+        });
+      }
     } finally {
       _refreshing = false;
       if (_refreshPending && mounted) {
@@ -2297,8 +2370,12 @@ class _LibraryPageState extends State<LibraryPage> {
   }
 
   /// The path relative to [root], lowercased for case-insensitive cameras.
-  String? _relativeToRoot(String filePath, String? root) {
+  String? _relativeToRoot(MediaFile file, String? root) {
     if (root == null) return null;
+    if (SafStorage.isUri(root) && file.relativePath != null) {
+      return path.withoutExtension(file.relativePath!).toLowerCase();
+    }
+    final filePath = file.path;
     final normalizedRoot = path.normalize(root);
     final normalizedFile = path.normalize(filePath);
     if (!path.isWithin(normalizedRoot, normalizedFile)) return null;
@@ -2442,7 +2519,7 @@ class _LibraryPageState extends State<LibraryPage> {
                                     Text(
                                       item.isPair
                                           ? item.displayName
-                                          : path.basename(asset.path),
+                                          : asset.name,
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                     ),
@@ -2470,9 +2547,7 @@ class _LibraryPageState extends State<LibraryPage> {
     );
   }
 
-  String _pairKey(String filePath) =>
-      '${path.dirname(filePath).toLowerCase()}/'
-      '${path.basenameWithoutExtension(filePath).toLowerCase()}';
+  String _pairKey(MediaFile file) => file.pairingKey.toLowerCase();
 }
 
 /// A small, translucent label over a thumbnail, e.g. `JPEG` or `CR3`.

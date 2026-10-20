@@ -15,6 +15,11 @@ class MediaFile {
   const MediaFile({
     required this.path,
     required this.kind,
+    this.displayName,
+    this.relativePath,
+    this.rootUri,
+    this.rootName,
+    this.modified,
     this.hash,
     this.alreadyExists = false,
     this.sizeBytes,
@@ -23,17 +28,29 @@ class MediaFile {
 
   final String path;
   final MediaKind kind;
+  final String? displayName;
+  final String? relativePath;
+  final String? rootUri;
+  final String? rootName;
+  final DateTime? modified;
   final String? hash;
   final bool alreadyExists;
   final int? sizeBytes;
   final DateTime? captureDate;
 
-  String get name => File(path).uri.pathSegments.last;
+  String get name => displayName ?? File(path).uri.pathSegments.last;
   String get stem => name.substring(0, name.lastIndexOf('.')).toLowerCase();
-
+  String get pairingKey =>
+      '${relativePath == null ? File(path).parent.path : _relativeParent(relativePath!)}'
+      '/$stem';
   MediaFile withHash(String value) => MediaFile(
     path: path,
     kind: kind,
+    displayName: displayName,
+    relativePath: relativePath,
+    rootUri: rootUri,
+    rootName: rootName,
+    modified: modified,
     hash: value,
     alreadyExists: alreadyExists,
     sizeBytes: sizeBytes,
@@ -43,11 +60,21 @@ class MediaFile {
   MediaFile withExistingStatus(bool value) => MediaFile(
     path: path,
     kind: kind,
+    displayName: displayName,
+    relativePath: relativePath,
+    rootUri: rootUri,
+    rootName: rootName,
+    modified: modified,
     hash: hash,
     alreadyExists: value,
     sizeBytes: sizeBytes,
     captureDate: captureDate,
   );
+}
+
+String _relativeParent(String value) {
+  final separator = value.lastIndexOf('/');
+  return separator < 0 ? '' : value.substring(0, separator);
 }
 
 class ReviewItem {

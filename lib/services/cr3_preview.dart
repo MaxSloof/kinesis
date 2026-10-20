@@ -9,6 +9,8 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 
+import 'saf_storage.dart';
+
 /// Extracts the JPEG previews embedded in Canon CR3 files and caches them on
 /// disk. The cache is keyed by path, size, and modification time so an edited
 /// or replaced RAW never reuses a stale preview.
@@ -38,14 +40,20 @@ class Cr3PreviewCache {
 
   Future<File?> _previewFor(String filePath) async {
     try {
-      final stat = await File(filePath).stat();
+      final safUri = SafStorage.isUri(filePath);
+      final safStat = safUri ? await SafStorage.instance.stat(filePath) : null;
+      if (safUri && safStat == null) {
+        throw FileSystemException(
+          'SAF document is no longer available',
+          filePath,
+        );
+      }
+      final stat = safUri ? null : await File(filePath).stat();
+      final size = safStat?.length ?? stat!.size;
+      final modified =
+          safStat?.lastModified ?? stat!.modified.millisecondsSinceEpoch;
       final key = sha1
-          .convert(
-            utf8.encode(
-              '$filePath|${stat.size}|'
-              '${stat.modified.millisecondsSinceEpoch}',
-            ),
-          )
+          .convert(utf8.encode('$filePath|$size|$modified'))
           .toString();
       if (_failed.contains(key)) return null;
       final target = File(
@@ -53,9 +61,27 @@ class Cr3PreviewCache {
       );
       if (await target.exists()) return target;
 
-      final bytes = await _withSlot(
-        () => Isolate.run(() => _extractPreviewBytes(filePath)),
-      );
+      File? temporarySource;
+      final Uint8List? bytes;
+      try {
+        bytes = await _withSlot(() async {
+          if (!safUri) return Isolate.run(() => _extractPreviewBytes(filePath));
+          final temporaryDirectory = await getTemporaryDirectory();
+          temporarySource = File(
+            path.join(temporaryDirectory.path, '$key.cr3'),
+          );
+          await SafStorage.instance.copyToCache(
+            filePath,
+            temporarySource!.path,
+          );
+          final sourcePath = temporarySource!.path;
+          return Isolate.run(() => _extractPreviewBytes(sourcePath));
+        });
+      } finally {
+        if (temporarySource != null && await temporarySource!.exists()) {
+          await temporarySource!.delete();
+        }
+      }
       if (bytes == null || bytes.length < 1024) {
         _failed.add(key);
         return null;

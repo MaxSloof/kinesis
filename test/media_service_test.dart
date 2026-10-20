@@ -19,6 +19,28 @@ void main() {
     expect(items.single.jpeg!.name, 'IMG_0001.JPG');
   });
 
+  test('SAF-backed media retains its display name and relative pairing path', () {
+    final jpeg = MediaFile(
+      path:
+          'content://provider/document/primary%3ADCIM%2FCamera%2FIMG_0001.JPG',
+      kind: MediaKind.jpeg,
+      displayName: 'IMG_0001.JPG',
+      relativePath: 'DCIM/Camera/IMG_0001.JPG',
+      rootUri: 'content://provider/tree/primary%3ADCIM',
+    );
+    final raw = MediaFile(
+      path:
+          'content://provider/document/primary%3ADCIM%2FCamera%2FIMG_0001.CR3',
+      kind: MediaKind.cr3,
+      displayName: 'IMG_0001.CR3',
+      relativePath: 'DCIM/Camera/IMG_0001.CR3',
+      rootUri: 'content://provider/tree/primary%3ADCIM',
+    );
+
+    expect(jpeg.name, 'IMG_0001.JPG');
+    expect(jpeg.pairingKey, raw.pairingKey);
+  });
+
   test('scanLibraryHashes finds existing media recursively', () async {
     final library = await Directory.systemTemp.createTemp('kinesis-library-');
     addTearDown(() => library.delete(recursive: true));

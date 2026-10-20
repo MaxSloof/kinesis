@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as path;
 
 import '../domain/media.dart';
+import 'saf_storage.dart';
 
 class MediaService {
   static final _libraryIndexLoads = <String, Future<Set<String>>>{};
@@ -25,16 +26,18 @@ class MediaService {
     '.mov': MediaKind.video,
   };
 
-  Future<DateTime?> _readCaptureDate(File file, MediaKind kind) async {
+  Future<DateTime?> _readCaptureDate(String filePath, MediaKind kind) async {
     if (kind == MediaKind.cr3 || kind == MediaKind.video) return null;
     try {
-      final value = await Isolate.run(
-        () => _readExifDateString(file.path, kind == MediaKind.jpeg),
-      );
+      final value = SafStorage.isUri(filePath)
+          ? await _readSafExifDateString(filePath)
+          : await Isolate.run(
+              () => _readExifDateString(filePath, kind == MediaKind.jpeg),
+            );
       return value == null ? null : _parseExifDate(value);
     } on Object catch (error) {
       debugPrint(
-        '[metadata] could not read capture date for ${file.path}: $error',
+        '[metadata] could not read capture date for $filePath: $error',
       );
     }
     return null;
@@ -72,22 +75,24 @@ class MediaService {
     Set<String> existingHashes = const {},
   }) async {
     final files = <MediaFile>[];
-    await for (final entity in Directory(
-      source,
-    ).list(recursive: true, followLinks: false)) {
-      if (entity is! File) continue;
-      // FAT/exFAT camera cards copied from macOS can contain AppleDouble
-      // metadata sidecars named `._<original-name>` that are not media.
-      if (path.basename(entity.path).startsWith('._')) continue;
-      if (_inTrashFolder(entity.path)) continue;
-      final kind = _extensions[path.extension(entity.path).toLowerCase()];
-      if (kind != null) {
-        final stat = await entity.stat();
+    if (SafStorage.isUri(source)) {
+      final sourceRootName = (await SafStorage.instance.stat(source))?.name;
+      await for (final entry in SafStorage.instance.walk(source)) {
+        final document = entry.file;
+        if (document.isDir || document.name.startsWith('._')) continue;
+        if (entry.relativePath.split('/').contains('.kinesis-trash')) continue;
+        final kind = _extensions[path.extension(document.name).toLowerCase()];
+        if (kind == null) continue;
         final file = MediaFile(
-          path: entity.path,
+          path: document.uri,
           kind: kind,
-          sizeBytes: stat.size,
-          captureDate: await _readCaptureDate(entity, kind),
+          displayName: document.name,
+          relativePath: entry.relativePath,
+          rootUri: source,
+          rootName: sourceRootName,
+          sizeBytes: document.length,
+          modified: DateTime.fromMillisecondsSinceEpoch(document.lastModified),
+          captureDate: await _readCaptureDate(document.uri, kind),
         );
         files.add(
           existingHashes.isEmpty
@@ -97,12 +102,40 @@ class MediaService {
                 ),
         );
       }
+    } else {
+      await for (final entity in Directory(
+        source,
+      ).list(recursive: true, followLinks: false)) {
+        if (entity is! File) continue;
+        // FAT/exFAT camera cards copied from macOS can contain AppleDouble
+        // metadata sidecars named `._<original-name>` that are not media.
+        if (path.basename(entity.path).startsWith('._')) continue;
+        if (_inTrashFolder(entity.path)) continue;
+        final kind = _extensions[path.extension(entity.path).toLowerCase()];
+        if (kind != null) {
+          final stat = await entity.stat();
+          final file = MediaFile(
+            path: entity.path,
+            kind: kind,
+            sizeBytes: stat.size,
+            modified: stat.modified,
+            captureDate: await _readCaptureDate(entity.path, kind),
+          );
+          files.add(
+            existingHashes.isEmpty
+                ? file
+                : file.withExistingStatus(
+                    existingHashes.contains(await hashFile(file.path)),
+                  ),
+          );
+        }
+      }
     }
     final pairs = <String, Map<MediaKind, List<MediaFile>>>{};
     final singles = <ReviewItem>[];
     for (final file in files) {
       if (file.kind == MediaKind.jpeg || file.kind == MediaKind.cr3) {
-        final key = '${path.dirname(file.path).toLowerCase()}/${file.stem}';
+        final key = file.pairingKey.toLowerCase();
         pairs
             .putIfAbsent(key, () => {})
             .putIfAbsent(file.kind, () => [])
@@ -138,7 +171,11 @@ class MediaService {
     for (final item in items) {
       final files = <MediaFile>[];
       for (final file in item.files) {
-        final size = (await File(file.path).stat()).size;
+        final size =
+            file.sizeBytes ??
+            (SafStorage.isUri(file.path)
+                ? (await SafStorage.instance.stat(file.path))?.length ?? 0
+                : (await File(file.path).stat()).size);
         final hashes = existingHashesBySize[size];
         if (hashes != null) candidateCount++;
         if (hashes != null) candidateBytes += size;
@@ -175,6 +212,15 @@ class MediaService {
     Set<int>? candidateSizes,
   }) async {
     final hashes = <String>{};
+    if (SafStorage.isUri(library)) {
+      for (final file in await _libraryFiles(library)) {
+        if (candidateSizes != null && !candidateSizes.contains(file.size)) {
+          continue;
+        }
+        hashes.add(await hashFile(file.absolutePath));
+      }
+      return hashes;
+    }
     await for (final entity in Directory(
       library,
     ).list(recursive: true, followLinks: false)) {
@@ -212,6 +258,22 @@ class MediaService {
   }
 
   Future<Set<String>> _loadLibraryHashes(String library) async {
+    if (SafStorage.isUri(library)) {
+      debugPrint('[scan] SAF destination: enumerating library files');
+      final totalWatch = Stopwatch()..start();
+      final files = await _libraryFiles(library);
+      final hashWatch = Stopwatch()..start();
+      final hashes = await _hashLibraryFiles(files);
+      hashWatch.stop();
+      _libraryHashesBySize[library] = _groupHashesBySize(files, hashes);
+      totalWatch.stop();
+      debugPrint(
+        '[scan] SAF destination indexed: ${files.length} files, '
+        '${hashWatch.elapsedMilliseconds}ms hashing, '
+        '${totalWatch.elapsedMilliseconds}ms total',
+      );
+      return hashes.values.toSet();
+    }
     debugPrint('[scan] destination index load started: $library');
     final index = _libraryIndexFile(library);
     final totalWatch = Stopwatch()..start();
@@ -318,8 +380,10 @@ class MediaService {
   }
 
   Future<Map<int, Set<String>>> libraryHashesBySize(String library) async {
-    final index = _libraryIndexFile(library);
-    debugPrint('[scan] destination index: checking ${index.path}');
+    if (!SafStorage.isUri(library)) {
+      final index = _libraryIndexFile(library);
+      debugPrint('[scan] destination index: checking ${index.path}');
+    }
     final refreshWatch = Stopwatch()..start();
     await loadLibraryHashes(library);
     refreshWatch.stop();
@@ -361,6 +425,14 @@ class MediaService {
     String library,
     Iterable<ImportedAsset> assets,
   ) async {
+    if (SafStorage.isUri(library)) {
+      final grouped = _libraryHashesBySize.putIfAbsent(library, () => {});
+      for (final asset in assets) {
+        final size = asset.sizeBytes;
+        if (size != null) grouped.putIfAbsent(size, () => {}).add(asset.hash);
+      }
+      return;
+    }
     final root = path.normalize(path.absolute(library));
     final additions = <String, _LibraryFile>{};
     final addedHashes = <String, String>{};
@@ -374,6 +446,7 @@ class MediaService {
         size: stat.size,
         modifiedMilliseconds: stat.modified.millisecondsSinceEpoch,
         absolutePath: absolutePath,
+        name: path.basename(absolutePath),
       );
       addedHashes[relativePath] = asset.hash;
     }
@@ -413,6 +486,7 @@ class MediaService {
               size: value['size'] as int,
               modifiedMilliseconds: value['modified'] as int,
               absolutePath: absolutePath,
+              name: path.basename(absolutePath),
             );
             hashesByPath[relativePath] = value['hash'] as String;
           }
@@ -498,6 +572,23 @@ class MediaService {
   /// Lists JPEG files under [root] without reading EXIF. Used to match a RAW
   /// on a source card with a JPEG that was already imported into the library.
   Future<List<MediaFile>> listJpegs(String root) async {
+    if (SafStorage.isUri(root)) {
+      return [
+        for (final file in await _libraryFiles(root))
+          if (_isJpegPath(file.path))
+            MediaFile(
+              path: file.absolutePath,
+              kind: MediaKind.jpeg,
+              displayName: file.name,
+              relativePath: file.path,
+              rootUri: root,
+              sizeBytes: file.size,
+              modified: DateTime.fromMillisecondsSinceEpoch(
+                file.modifiedMilliseconds,
+              ),
+            ),
+      ];
+    }
     if (!await Directory(root).exists()) return const [];
     final files = await _libraryFiles(root);
     return [
@@ -515,6 +606,9 @@ class MediaService {
   /// index avoids walking slow removable or network volumes again during a
   /// source scan; falls back to [listJpegs] when no index is available.
   Future<Map<String, MediaFile>> libraryJpegs(String root) async {
+    if (SafStorage.isUri(root)) {
+      return {for (final jpeg in await listJpegs(root)) jpeg.stem: jpeg};
+    }
     final index = _libraryIndexFile(root);
     try {
       if (await index.exists()) {
@@ -567,8 +661,14 @@ class MediaService {
         result[i] = MediaFile(
           path: file.absolutePath,
           kind: kind,
+          displayName: file.name,
+          relativePath: file.path,
+          rootUri: SafStorage.isUri(library) ? library : null,
           sizeBytes: file.size,
-          captureDate: await _readCaptureDate(File(file.absolutePath), kind),
+          modified: DateTime.fromMillisecondsSinceEpoch(
+            file.modifiedMilliseconds,
+          ),
+          captureDate: await _readCaptureDate(file.absolutePath, kind),
         );
       }
     }
@@ -579,6 +679,32 @@ class MediaService {
 
   Future<List<_LibraryFile>> _libraryFiles(String library) async {
     final files = <_LibraryFile>[];
+    if (SafStorage.isUri(library)) {
+      await for (final entry in SafStorage.instance.walk(library)) {
+        final document = entry.file;
+        if (document.isDir ||
+            document.name.startsWith('._') ||
+            entry.relativePath.split('/').contains('.kinesis-trash') ||
+            entry.relativePath.split('/').contains('.kinesis-staging')) {
+          continue;
+        }
+        if (!_extensions.containsKey(
+          path.extension(document.name).toLowerCase(),
+        )) {
+          continue;
+        }
+        files.add(
+          _LibraryFile(
+            path: entry.relativePath,
+            size: document.length,
+            modifiedMilliseconds: document.lastModified,
+            absolutePath: document.uri,
+            name: document.name,
+          ),
+        );
+      }
+      return files;
+    }
     await for (final entity in Directory(
       library,
     ).list(recursive: true, followLinks: false)) {
@@ -598,6 +724,7 @@ class MediaService {
           size: stat.size,
           modifiedMilliseconds: stat.modified.millisecondsSinceEpoch,
           absolutePath: entity.path,
+          name: path.basename(entity.path),
         ),
       );
     }
@@ -611,6 +738,9 @@ class MediaService {
   };
 
   Future<String> hashFile(String filePath) async {
+    if (SafStorage.isUri(filePath)) {
+      return SafStorage.instance.hashFile(filePath);
+    }
     final digest = await sha256.bind(File(filePath).openRead()).first;
     return digest.toString();
   }
@@ -627,12 +757,15 @@ class MediaService {
     String library,
     String template,
   ) async {
-    final date = (await File(source.path).stat()).modified;
+    if (SafStorage.isUri(library)) {
+      return _copyAndVerifySaf(source, library, template);
+    }
+    final date = source.modified ?? (await File(source.path).stat()).modified;
     final directory = expandTemplate(
       template,
       date,
       source.name,
-      path.basename(path.dirname(source.path)),
+      _sourceFolder(source),
     );
     final libraryRoot = path.normalize(path.absolute(library));
     final destinationPath = path.normalize(
@@ -678,8 +811,88 @@ class MediaService {
       hash: sourceHash,
       path: destination.path,
       kind: source.kind,
+      sizeBytes: source.sizeBytes,
     );
   }
+
+  Future<ImportedAsset> _copyAndVerifySaf(
+    MediaFile source,
+    String library,
+    String template,
+  ) async {
+    final date = source.modified ?? source.captureDate ?? DateTime.now();
+    final directory = expandTemplate(
+      template,
+      date,
+      source.name,
+      _sourceFolder(source),
+    );
+    final segments = path.posix
+        .split(directory)
+        .where((segment) => segment.isNotEmpty && segment != '.');
+    if (path.posix.isAbsolute(directory) ||
+        segments.any((part) => part == '..')) {
+      throw FileSystemException(
+        'Destination template must remain inside the library',
+        template,
+      );
+    }
+    final destinationDirectory = segments.isEmpty
+        ? await SafStorage.instance.stat(library)
+        : await SafStorage.instance.mkdirp(library, segments.toList());
+    if (destinationDirectory == null) {
+      throw FileSystemException('Could not open SAF destination', library);
+    }
+    final sourceHash = source.hash ?? await hashFile(source.path);
+    final existing = await SafStorage.instance.list(destinationDirectory.uri);
+    final occupiedNames = existing.map((entry) => entry.name).toSet();
+    var name = source.name;
+    var number = 1;
+    while (occupiedNames.contains(name)) {
+      final base = path.basenameWithoutExtension(source.name);
+      name = '$base ($number)${path.extension(source.name)}';
+      number++;
+    }
+    final mimeType = _mimeTypeFor(source.name);
+    final copied = await SafStorage.instance.copyVerified(
+      sourceUri: source.path,
+      destinationDirectoryUri: destinationDirectory.uri,
+      name: name,
+      mimeType: mimeType,
+      expectedHash: sourceHash,
+    );
+    return ImportedAsset(
+      hash: sourceHash,
+      path: copied.uri,
+      kind: source.kind,
+      sizeBytes: copied.length,
+      displayName: copied.name,
+      relativePath: source.relativePath == null
+          ? copied.name
+          : path.posix.join(directory, copied.name),
+    );
+  }
+
+  String _sourceFolder(MediaFile file) {
+    final relativePath = file.relativePath;
+    if (relativePath != null) {
+      final parent = path.posix.dirname(relativePath);
+      return parent == '.' ? file.rootName ?? '' : path.posix.basename(parent);
+    }
+    return path.basename(path.dirname(file.path));
+  }
+
+  String _mimeTypeFor(String name) =>
+      switch (path.extension(name).toLowerCase()) {
+        '.jpg' || '.jpeg' => 'image/jpeg',
+        '.cr3' => 'image/x-canon-cr3',
+        '.png' => 'image/png',
+        '.heic' => 'image/heic',
+        '.gif' => 'image/gif',
+        '.mp4' => 'video/mp4',
+        '.mov' => 'video/quicktime',
+        _ => 'application/octet-stream',
+      };
 
   String expandTemplate(
     String template,
@@ -720,18 +933,34 @@ Future<String?> _readExifDateString(String filePath, bool headOnly) async {
   return null;
 }
 
+Future<String?> _readSafExifDateString(String uri) async {
+  final bytes = await SafStorage.instance.readHead(uri, 256 * 1024);
+  final tags = await readExifFromBytes(bytes);
+  for (final name in const [
+    'EXIF DateTimeOriginal',
+    'EXIF DateTimeDigitized',
+    'Image DateTime',
+  ]) {
+    final value = tags[name]?.printable;
+    if (value != null) return value;
+  }
+  return null;
+}
+
 class _LibraryFile {
   const _LibraryFile({
     required this.path,
     required this.size,
     required this.modifiedMilliseconds,
     required this.absolutePath,
+    required this.name,
   });
 
   final String path;
   final int size;
   final int modifiedMilliseconds;
   final String absolutePath;
+  final String name;
 }
 
 class ImportedAsset {
@@ -739,22 +968,34 @@ class ImportedAsset {
     required this.hash,
     required this.path,
     required this.kind,
+    this.sizeBytes,
+    this.displayName,
+    this.relativePath,
   });
 
   final String hash;
   final String path;
   final MediaKind kind;
+  final int? sizeBytes;
+  final String? displayName;
+  final String? relativePath;
 
-  Map<String, String> toJson() => {
+  Map<String, dynamic> toJson() => {
     'hash': hash,
     'path': path,
     'kind': kind.name,
+    if (sizeBytes != null) 'sizeBytes': sizeBytes,
+    if (displayName != null) 'displayName': displayName,
+    if (relativePath != null) 'relativePath': relativePath,
   };
 
   static ImportedAsset fromJson(Map<String, dynamic> json) => ImportedAsset(
     hash: json['hash']! as String,
     path: json['path']! as String,
     kind: MediaKind.values.byName(json['kind']! as String),
+    sizeBytes: json['sizeBytes'] as int?,
+    displayName: json['displayName'] as String?,
+    relativePath: json['relativePath'] as String?,
   );
 }
 
@@ -784,7 +1025,23 @@ class TrashService {
   /// Moves [filePath] to the system Trash. Volumes without a Trash (NAS/SMB
   /// shares) fall back to a `.kinesis-trash/<date>/` holding folder at the
   /// volume root, preserving the relative path so nothing collides.
-  Future<void> moveToTrash(String filePath) async {
+  Future<void> moveToTrash(MediaFile file) async {
+    final filePath = file.path;
+    if (SafStorage.isUri(filePath)) {
+      final rootUri = file.rootUri;
+      final relativePath = file.relativePath;
+      if (rootUri == null || relativePath == null) {
+        throw FileSystemException('Missing SAF source location', filePath);
+      }
+      if (await SafStorage.instance.exists(filePath)) {
+        await SafStorage.instance.moveToTrash(
+          rootUri: rootUri,
+          fileUri: filePath,
+          relativePath: relativePath,
+        );
+      }
+      return;
+    }
     try {
       await _systemTrash(filePath);
     } on Object catch (error) {

@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'domain/media.dart';
 import 'domain/selection.dart';
@@ -62,6 +63,10 @@ class KinesisHome extends StatefulWidget {
 }
 
 class _KinesisHomeState extends State<KinesisHome> {
+  static final _readmeUri = Uri.parse(
+    'https://github.com/MaxSloof/kinesis#readme',
+  );
+
   final _media = MediaService();
   final _trash = TrashService();
   final _decisions = <int, ReviewDecision>{};
@@ -172,6 +177,16 @@ class _KinesisHomeState extends State<KinesisHome> {
   }
 
   void _toggleDateGrouping() => setState(() => _groupByDate = !_groupByDate);
+
+  Future<void> _openHelp() async {
+    if (await launchUrl(_readmeUri, mode: LaunchMode.externalApplication)) {
+      return;
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Could not open the Kinesis README.')),
+    );
+  }
 
   Future<void> _loadSettings() async {
     final support = await getApplicationSupportDirectory();
@@ -953,6 +968,11 @@ class _KinesisHomeState extends State<KinesisHome> {
             ],
           ),
           actions: [
+            IconButton(
+              onPressed: _openHelp,
+              icon: const Icon(Icons.help_outline),
+              tooltip: 'Help',
+            ),
             IconButton(
               onPressed: _showSettings,
               icon: const Icon(Icons.settings_outlined),

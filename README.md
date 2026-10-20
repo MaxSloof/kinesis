@@ -13,6 +13,18 @@ Kinesis is under active development. This repository provides macOS, Linux and
 Windows desktop projects plus Android and iOS projects. Only macOS has been
 tested so far; the other platforms are untested.
 
+### Platform versions
+
+The current app version is **1.0.0** (build **1**) on each platform. These
+values come from `pubspec.yaml` and are used for Android, Windows, and iOS
+builds.
+
+| Platform | Version | Build |
+| --- | --- | --- |
+| Android | 1.0.0 | 1 (`versionCode`) |
+| Windows | 1.0.0 | 1 |
+| iOS | 1.0.0 | 1 |
+
 ## Features
 
 - Review a source folder in single-image or grid view, with sorting and date

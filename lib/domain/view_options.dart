@@ -6,7 +6,9 @@ enum MediaSortOrder {
   captureNewest,
   captureOldest,
   sizeLargest,
-  sizeSmallest,
+  sizeSmallest;
+
+  static const reviewDefault = captureOldest;
 }
 
 class MediaDateGroup<T> {

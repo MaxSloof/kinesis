@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" alt="Kinesis logo" width="160">
+</p>
+
 # Kinesis
 
 Kinesis is a lightweight, local-first desktop application for reviewing and
@@ -5,9 +9,9 @@ ingesting photos and other media from a camera card, USB drive, or folder into
 a media library. It copies selected files, verifies each copy with SHA-256,
 and can then move the source files to Trash.
 
-Kinesis is under active development. This repository currently provides macOS
-and Linux desktop projects; other platforms are not currently documented or
-tested as supported targets.
+Kinesis is under active development. This repository provides macOS, Linux and
+Windows desktop projects plus Android and iOS projects. Only macOS has been
+tested so far; the other platforms are untested.
 
 ## Features
 

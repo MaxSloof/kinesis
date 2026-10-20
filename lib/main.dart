@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 
@@ -23,18 +24,33 @@ void main() {
   runApp(const KinesisApp());
 }
 
+final themeModeNotifier = ValueNotifier<ThemeMode>(ThemeMode.system);
+
 class KinesisApp extends StatelessWidget {
   const KinesisApp({super.key});
 
+  static const _seed = Color(0xff176b67);
+
   @override
-  Widget build(BuildContext context) => MaterialApp(
-    title: 'Kinesis',
-    debugShowCheckedModeBanner: false,
-    theme: ThemeData(
-      colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff176b67)),
-      useMaterial3: true,
+  Widget build(BuildContext context) => ValueListenableBuilder<ThemeMode>(
+    valueListenable: themeModeNotifier,
+    builder: (context, mode, _) => MaterialApp(
+      title: 'Kinesis',
+      debugShowCheckedModeBanner: false,
+      themeMode: mode,
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: _seed),
+        useMaterial3: true,
+      ),
+      darkTheme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: _seed,
+          brightness: Brightness.dark,
+        ),
+        useMaterial3: true,
+      ),
+      home: const KinesisHome(),
     ),
-    home: const KinesisHome(),
   );
 }
 
@@ -57,6 +73,7 @@ class _KinesisHomeState extends State<KinesisHome> {
   String? _library;
   String _template = '{year}/{year}-{month}-{day}';
   bool _splitRawAndJpeg = false;
+  bool _vimKeys = true;
   String _jpegTemplate = 'JPEG/{year}/{year}-{month}-{day}';
   String _cr3Template = 'CRAW/{year}/{year}-{month}-{day}';
   Map<ReviewDecision, String> _shortcuts = {
@@ -66,9 +83,15 @@ class _KinesisHomeState extends State<KinesisHome> {
     ReviewDecision.deleteBoth: 'F',
   };
   int _current = 0;
+  final _zoomController = TransformationController();
+  Size _viewSize = Size.zero;
+  int? _zoomedItem;
+  int? _gridCursor;
+  int _gridColumns = 1;
+  final _tileKeys = <int, GlobalKey>{};
   bool _scanning = false;
   bool _gridMode = false;
-  MediaSortOrder _sortOrder = MediaSortOrder.nameAscending;
+  MediaSortOrder _sortOrder = MediaSortOrder.reviewDefault;
   bool _groupByDate = true;
   String? _source;
   StreamSubscription<FileSystemEvent>? _sourceWatch;
@@ -88,6 +111,7 @@ class _KinesisHomeState extends State<KinesisHome> {
   void dispose() {
     _sourceRefreshTimer?.cancel();
     _sourceWatch?.cancel();
+    _zoomController.dispose();
     super.dispose();
   }
 
@@ -164,8 +188,13 @@ class _KinesisHomeState extends State<KinesisHome> {
       _library = state['library'] as String?;
       _template = state['template'] as String? ?? _template;
       _splitRawAndJpeg = state['splitRawAndJpeg'] as bool? ?? false;
+      _vimKeys = state['vimKeys'] as bool? ?? true;
       _jpegTemplate = state['jpegTemplate'] as String? ?? _jpegTemplate;
       _cr3Template = state['cr3Template'] as String? ?? _cr3Template;
+      themeModeNotifier.value = ThemeMode.values.firstWhere(
+        (mode) => mode.name == state['themeMode'],
+        orElse: () => ThemeMode.system,
+      );
       final savedShortcuts = state['shortcuts'] as Map<String, dynamic>?;
       if (savedShortcuts != null) {
         _shortcuts = {
@@ -209,8 +238,10 @@ class _KinesisHomeState extends State<KinesisHome> {
         'assets': _libraryAssets.map((asset) => asset.toJson()).toList(),
         'template': _template,
         'splitRawAndJpeg': _splitRawAndJpeg,
+        'vimKeys': _vimKeys,
         'jpegTemplate': _jpegTemplate,
         'cr3Template': _cr3Template,
+        'themeMode': themeModeNotifier.value.name,
         'shortcuts': {
           for (final entry in _shortcuts.entries) entry.key.name: entry.value,
         },
@@ -871,15 +902,56 @@ class _KinesisHomeState extends State<KinesisHome> {
         SingleActivator(logicalKeyForShortcut(_shortcuts[decision]!)): () =>
             _decide(decision),
       const SingleActivator(LogicalKeyboardKey.arrowLeft): () =>
-          _moveCurrent(-1),
+          _navigate(-1, 0),
       const SingleActivator(LogicalKeyboardKey.arrowRight): () =>
-          _moveCurrent(1),
+          _navigate(1, 0),
+      if (_vimKeys)
+        const SingleActivator(LogicalKeyboardKey.keyH): () => _navigate(-1, 0),
+      if (_vimKeys)
+        const SingleActivator(LogicalKeyboardKey.keyK): () => _navigate(0, -1),
+      if (_vimKeys)
+        const SingleActivator(LogicalKeyboardKey.keyL): () => _navigate(1, 0),
+      if (_vimKeys)
+        const SingleActivator(LogicalKeyboardKey.keyJ): () => _navigate(0, 1),
+      const SingleActivator(LogicalKeyboardKey.arrowUp): () => _navigate(0, -1),
+      const SingleActivator(LogicalKeyboardKey.arrowDown): () =>
+          _navigate(0, 1),
+      const SingleActivator(LogicalKeyboardKey.space): _toggleCursorTile,
+      const SingleActivator(LogicalKeyboardKey.equal, meta: true): () =>
+          _zoomBy(1.25),
+      const SingleActivator(LogicalKeyboardKey.add, meta: true): () =>
+          _zoomBy(1.25),
+      const SingleActivator(LogicalKeyboardKey.numpadAdd, meta: true): () =>
+          _zoomBy(1.25),
+      const SingleActivator(LogicalKeyboardKey.minus, meta: true): () =>
+          _zoomBy(0.8),
+      const SingleActivator(
+        LogicalKeyboardKey.numpadSubtract,
+        meta: true,
+      ): () =>
+          _zoomBy(0.8),
+      const SingleActivator(LogicalKeyboardKey.digit0, meta: true): () =>
+          _zoomController.value = Matrix4.identity(),
     },
     child: Focus(
       autofocus: true,
       child: Scaffold(
         appBar: AppBar(
-          title: const Text('Kinesis'),
+          title: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(6),
+                child: SvgPicture.asset(
+                  'assets/logo.svg',
+                  width: 28,
+                  height: 28,
+                ),
+              ),
+              const SizedBox(width: 10),
+              const Text('Kinesis'),
+            ],
+          ),
           actions: [
             IconButton(
               onPressed: _showSettings,
@@ -1007,8 +1079,16 @@ class _KinesisHomeState extends State<KinesisHome> {
 
   Widget _review() {
     final visibleOrder = _displayOrder;
-    final item = _items[visibleOrder[_current]];
+    final itemIndex = visibleOrder[_current];
+    final item = _items[itemIndex];
+    final decision = _decisions[itemIndex];
     final preview = _previewFor(item);
+    if (_zoomedItem != itemIndex) {
+      _zoomedItem = itemIndex;
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _zoomController.value = Matrix4.identity(),
+      );
+    }
     return Padding(
       padding: const EdgeInsets.all(32),
       child: Column(
@@ -1021,31 +1101,67 @@ class _KinesisHomeState extends State<KinesisHome> {
               fit: StackFit.expand,
               children: [
                 Card(
-                  child: Center(
-                    child: MediaPreview(
-                      preview: preview,
-                      cr3Path: item.cr3?.path,
-                      fit: BoxFit.contain,
-                      cacheWidth: 1600,
-                      loading: const Center(
-                        child: CircularProgressIndicator(strokeWidth: 2),
+                  clipBehavior: Clip.antiAlias,
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      _viewSize = constraints.biggest;
+                      return InteractiveViewer(
+                        transformationController: _zoomController,
+                        maxScale: 8,
+                        child: Center(
+                          child: MediaPreview(
+                            preview: preview,
+                            cr3Path: item.cr3?.path,
+                            fit: BoxFit.contain,
+                            cacheWidth: 1600,
+                            loading: const Center(
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                            placeholder: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.perm_media_outlined, size: 96),
+                                const SizedBox(height: 16),
+                                Text(item.displayName),
+                                const Text('Preview unavailable'),
+                              ],
+                            ),
+                            errorPlaceholder: Text(item.displayName),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+                Positioned(
+                  right: 12,
+                  top: 12,
+                  child: Column(
+                    children: [
+                      IconButton.filledTonal(
+                        onPressed: () => _zoomBy(1.25),
+                        icon: const Icon(Icons.add),
+                        tooltip: 'Zoom in (⌘+)',
                       ),
-                      placeholder: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(Icons.perm_media_outlined, size: 96),
-                          const SizedBox(height: 16),
-                          Text(item.displayName),
-                          const Text('Preview unavailable'),
-                        ],
+                      const SizedBox(height: 4),
+                      IconButton.filledTonal(
+                        onPressed: () => _zoomBy(0.8),
+                        icon: const Icon(Icons.remove),
+                        tooltip: 'Zoom out (⌘−)',
                       ),
-                      errorPlaceholder: Text(item.displayName),
-                    ),
+                    ],
                   ),
                 ),
                 if (item.isDuplicate)
                   Positioned.fill(child: _duplicateOverlay()),
                 Positioned(left: 12, top: 12, child: _formatBadges(item)),
+                if (decision != null)
+                  Positioned(
+                    left: 12,
+                    right: 12,
+                    bottom: 16,
+                    child: Center(child: _selectedActionBadge(decision)),
+                  ),
               ],
             ),
           ),
@@ -1111,6 +1227,108 @@ class _KinesisHomeState extends State<KinesisHome> {
         ],
       ),
     );
+  }
+
+  void _zoomBy(double factor) {
+    if (_gridMode || _items.isEmpty) return;
+    final current = _zoomController.value.getMaxScaleOnAxis();
+    final target = (current * factor).clamp(1.0, 8.0);
+    final ratio = target / current;
+    final center = Offset(_viewSize.width / 2, _viewSize.height / 2);
+    final next = Matrix4.identity()
+      ..translateByDouble(center.dx, center.dy, 0, 1)
+      ..scaleByDouble(ratio, ratio, 1, 1)
+      ..translateByDouble(-center.dx, -center.dy, 0, 1)
+      ..multiply(_zoomController.value);
+    if (target <= 1.0) {
+      _zoomController.value = Matrix4.identity();
+    } else {
+      _zoomController.value = next;
+    }
+  }
+
+  List<MediaDateGroup<int>> _gridGroups() => _groupByDate
+      ? MediaViewOrder.groupByCaptureDate<int>(
+          _displayOrder,
+          (index) => _items[index].captureDate,
+          newestFirst: _sortOrder != MediaSortOrder.captureOldest,
+        )
+      : [MediaDateGroup(label: '', items: _displayOrder)];
+
+  void _navigate(int dx, int dy) {
+    if (_items.isEmpty) return;
+    if (!_gridMode) {
+      final step = dx + dy;
+      if (step != 0) _moveCurrent(step);
+      return;
+    }
+    final groups = _gridGroups().where((g) => g.items.isNotEmpty).toList();
+    if (groups.isEmpty) return;
+    var gi = 0;
+    var ii = 0;
+    final cursor = _gridCursor;
+    var found = false;
+    if (cursor != null) {
+      for (var g = 0; g < groups.length && !found; g++) {
+        final i = groups[g].items.indexOf(cursor);
+        if (i >= 0) {
+          gi = g;
+          ii = i;
+          found = true;
+        }
+      }
+    }
+    if (found) {
+      final cols = _gridColumns;
+      if (dx != 0) {
+        ii += dx;
+        if (ii < 0) {
+          if (gi == 0) return;
+          gi--;
+          ii = groups[gi].items.length - 1;
+        } else if (ii >= groups[gi].items.length) {
+          if (gi == groups.length - 1) return;
+          gi++;
+          ii = 0;
+        }
+      } else if (dy != 0) {
+        final col = ii % cols;
+        final target = ii + dy * cols;
+        if (target < 0) {
+          if (gi == 0) return;
+          gi--;
+          final len = groups[gi].items.length;
+          final lastRowStart = ((len - 1) ~/ cols) * cols;
+          ii = (lastRowStart + col).clamp(0, len - 1);
+        } else if (target >= groups[gi].items.length) {
+          final len = groups[gi].items.length;
+          final inLastRow = ii >= ((len - 1) ~/ cols) * cols;
+          if (inLastRow) {
+            if (gi == groups.length - 1) return;
+            gi++;
+            ii = col.clamp(0, groups[gi].items.length - 1);
+          } else {
+            ii = len - 1;
+          }
+        } else {
+          ii = target;
+        }
+      }
+    }
+    final next = groups[gi].items[ii];
+    setState(() => _gridCursor = next);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final ctx = _tileKeys[next]?.currentContext;
+      if (ctx != null) {
+        Scrollable.ensureVisible(ctx, alignment: 0.5);
+      }
+    });
+  }
+
+  void _toggleCursorTile() {
+    final cursor = _gridCursor;
+    if (!_gridMode || cursor == null) return;
+    _toggleGridSelection(cursor);
   }
 
   void _moveCurrent(int offset) {
@@ -1294,50 +1512,60 @@ class _KinesisHomeState extends State<KinesisHome> {
           ),
         ),
         Expanded(
-          child: CustomScrollView(
-            slivers: [
-              for (final group in groups) ...[
-                if (_groupByDate)
-                  SliverToBoxAdapter(
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(20, 8, 20, 4),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              group.label,
-                              style: Theme.of(context).textTheme.titleMedium,
-                            ),
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              _gridColumns = ((constraints.maxWidth - 32 + 12) / (180 + 12))
+                  .ceil()
+                  .clamp(1, 1000);
+              return CustomScrollView(
+                slivers: [
+                  for (final group in groups) ...[
+                    if (_groupByDate)
+                      SliverToBoxAdapter(
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(20, 8, 20, 4),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  group.label,
+                                  style: Theme.of(
+                                    context,
+                                  ).textTheme.titleMedium,
+                                ),
+                              ),
+                              TextButton(
+                                onPressed: () =>
+                                    _toggleGroupSelection(group.items),
+                                child: Text(
+                                  _selection.containsAll(group.items)
+                                      ? 'Clear day'
+                                      : 'Select day',
+                                ),
+                              ),
+                            ],
                           ),
-                          TextButton(
-                            onPressed: () => _toggleGroupSelection(group.items),
-                            child: Text(
-                              _selection.containsAll(group.items)
-                                  ? 'Clear day'
-                                  : 'Select day',
+                        ),
+                      ),
+                    SliverPadding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                      sliver: SliverGrid(
+                        gridDelegate:
+                            const SliverGridDelegateWithMaxCrossAxisExtent(
+                              maxCrossAxisExtent: 180,
+                              mainAxisSpacing: 12,
+                              crossAxisSpacing: 12,
                             ),
-                          ),
-                        ],
+                        delegate: SliverChildBuilderDelegate(
+                          (_, index) => _gridTile(group.items[index]),
+                          childCount: group.items.length,
+                        ),
                       ),
                     ),
-                  ),
-                SliverPadding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                  sliver: SliverGrid(
-                    gridDelegate:
-                        const SliverGridDelegateWithMaxCrossAxisExtent(
-                          maxCrossAxisExtent: 180,
-                          mainAxisSpacing: 12,
-                          crossAxisSpacing: 12,
-                        ),
-                    delegate: SliverChildBuilderDelegate(
-                      (_, index) => _gridTile(group.items[index]),
-                      childCount: group.items.length,
-                    ),
-                  ),
-                ),
-              ],
-            ],
+                  ],
+                ],
+              );
+            },
           ),
         ),
         if (_selection.isNotEmpty)
@@ -1394,8 +1622,13 @@ class _KinesisHomeState extends State<KinesisHome> {
     final selected = _selection.contains(logicalIndex);
     final decision = _decisions[logicalIndex];
     final isDuplicate = item.isDuplicate;
+    final focused = _gridCursor == logicalIndex;
     return InkWell(
-      onTap: () => _toggleGridSelection(logicalIndex),
+      key: _tileKeys.putIfAbsent(logicalIndex, GlobalKey.new),
+      onTap: () {
+        setState(() => _gridCursor = logicalIndex);
+        _toggleGridSelection(logicalIndex);
+      },
       onDoubleTap: () => setState(() {
         _current = _displayOrder.indexOf(logicalIndex);
         _gridMode = false;
@@ -1403,6 +1636,15 @@ class _KinesisHomeState extends State<KinesisHome> {
       }),
       child: Card(
         color: selected ? Theme.of(context).colorScheme.primaryContainer : null,
+        shape: focused
+            ? RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+                side: BorderSide(
+                  color: Theme.of(context).colorScheme.primary,
+                  width: 3,
+                ),
+              )
+            : null,
         clipBehavior: Clip.antiAlias,
         child: Stack(
           children: [
@@ -1494,6 +1736,72 @@ class _KinesisHomeState extends State<KinesisHome> {
     ReviewDecision.deleteBoth => 'Delete',
   };
 
+  String _selectedActionLabel(ReviewDecision decision) => switch (decision) {
+    ReviewDecision.keepBoth => 'Keep both',
+    ReviewDecision.keepJpeg => 'Keep JPEG',
+    ReviewDecision.keepCr3 => 'Keep CR3',
+    ReviewDecision.deleteBoth => 'Delete both',
+  };
+
+  Widget _selectedActionBadge(ReviewDecision decision) {
+    final colors = Theme.of(context).colorScheme;
+    final isDelete = decision == ReviewDecision.deleteBoth;
+    final background = isDelete
+        ? colors.errorContainer
+        : colors.primaryContainer;
+    final foreground = isDelete
+        ? colors.onErrorContainer
+        : colors.onPrimaryContainer;
+    final icon = switch (decision) {
+      ReviewDecision.keepBoth => Icons.done_all,
+      ReviewDecision.keepJpeg => Icons.photo_outlined,
+      ReviewDecision.keepCr3 => Icons.raw_on_outlined,
+      ReviewDecision.deleteBoth => Icons.delete_outline,
+    };
+
+    return Semantics(
+      container: true,
+      label: 'Selected action: ${_selectedActionLabel(decision)}',
+      child: Material(
+        color: background,
+        elevation: 6,
+        shadowColor: Colors.black54,
+        borderRadius: BorderRadius.circular(14),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, color: foreground, size: 22),
+              const SizedBox(width: 10),
+              Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'SELECTED ACTION',
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: foreground,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.8,
+                    ),
+                  ),
+                  Text(
+                    _selectedActionLabel(decision),
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      color: foreground,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _action(String key, String label, ReviewDecision decision) =>
       FilledButton.tonal(
         onPressed: () => _decide(decision),
@@ -1503,8 +1811,10 @@ class _KinesisHomeState extends State<KinesisHome> {
   Future<void> _showSettings() async {
     final controller = TextEditingController(text: _template);
     var splitRawAndJpeg = _splitRawAndJpeg;
+    var vimKeys = _vimKeys;
     final jpegController = TextEditingController(text: _jpegTemplate);
     final cr3Controller = TextEditingController(text: _cr3Template);
+    var themeMode = themeModeNotifier.value;
     final keys = {
       for (final entry in _shortcuts.entries)
         entry.key: TextEditingController(text: entry.value),
@@ -1519,6 +1829,30 @@ class _KinesisHomeState extends State<KinesisHome> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
+                StatefulBuilder(
+                  builder: (context, setDialogState) =>
+                      DropdownButtonFormField<ThemeMode>(
+                        initialValue: themeMode,
+                        decoration: const InputDecoration(labelText: 'Theme'),
+                        items: const [
+                          DropdownMenuItem(
+                            value: ThemeMode.system,
+                            child: Text('System'),
+                          ),
+                          DropdownMenuItem(
+                            value: ThemeMode.light,
+                            child: Text('Light'),
+                          ),
+                          DropdownMenuItem(
+                            value: ThemeMode.dark,
+                            child: Text('Dark'),
+                          ),
+                        ],
+                        onChanged: (value) => setDialogState(
+                          () => themeMode = value ?? ThemeMode.system,
+                        ),
+                      ),
+                ),
                 TextField(
                   controller: controller,
                   decoration: const InputDecoration(
@@ -1554,6 +1888,17 @@ class _KinesisHomeState extends State<KinesisHome> {
                         ),
                       ],
                     ],
+                  ),
+                ),
+                StatefulBuilder(
+                  builder: (context, setDialogState) => SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    value: vimKeys,
+                    title: const Text('Vim navigation keys'),
+                    subtitle: const Text(
+                      'Use H, J, K, L to move between images',
+                    ),
+                    onChanged: (value) => setDialogState(() => vimKeys = value),
                   ),
                 ),
                 for (final decision in ReviewDecision.values)
@@ -1597,9 +1942,11 @@ class _KinesisHomeState extends State<KinesisHome> {
                 cr3Controller.text.trim().isEmpty))) {
       return;
     }
+    themeModeNotifier.value = themeMode;
     setState(() {
       _template = controller.text.trim();
       _splitRawAndJpeg = splitRawAndJpeg;
+      _vimKeys = vimKeys;
       _jpegTemplate = jpegController.text.trim();
       _cr3Template = cr3Controller.text.trim();
       _shortcuts = {
@@ -1657,7 +2004,7 @@ class LibraryPage extends StatefulWidget {
 
 class _LibraryPageState extends State<LibraryPage> {
   List<MediaFile> _assets = [];
-  MediaSortOrder _sortOrder = MediaSortOrder.nameAscending;
+  MediaSortOrder _sortOrder = MediaSortOrder.reviewDefault;
   bool _groupByDate = true;
   StreamSubscription<FileSystemEvent>? _libraryWatch;
   Timer? _refreshTimer;

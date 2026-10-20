@@ -38,6 +38,17 @@ void main() {
     );
   });
 
+  test('review defaults to capture date from oldest to newest', () {
+    expect(MediaSortOrder.reviewDefault, MediaSortOrder.captureOldest);
+    expect(
+      MediaViewOrder.sortFiles(
+        files,
+        MediaSortOrder.reviewDefault,
+      ).map((file) => file.name),
+      ['IMG_02.JPG', 'IMG_01.JPG', 'NO_DATE.JPG'],
+    );
+  });
+
   test('files sort by size in either direction with deterministic ties', () {
     final tied = [
       const MediaFile(

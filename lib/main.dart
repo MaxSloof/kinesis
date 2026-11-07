@@ -80,6 +80,7 @@ class _KinesisHomeState extends State<KinesisHome> {
   String _template = '{year}/{year}-{month}-{day}';
   bool _splitRawAndJpeg = false;
   bool _vimKeys = true;
+  bool _trashSources = true;
   String _jpegTemplate = 'JPEG/{year}/{year}-{month}-{day}';
   String _cr3Template = 'CRAW/{year}/{year}-{month}-{day}';
   Map<ReviewDecision, String> _shortcuts = {
@@ -213,6 +214,7 @@ class _KinesisHomeState extends State<KinesisHome> {
       _template = state['template'] as String? ?? _template;
       _splitRawAndJpeg = state['splitRawAndJpeg'] as bool? ?? false;
       _vimKeys = state['vimKeys'] as bool? ?? true;
+      _trashSources = state['trashSources'] as bool? ?? true;
       _jpegTemplate = state['jpegTemplate'] as String? ?? _jpegTemplate;
       _cr3Template = state['cr3Template'] as String? ?? _cr3Template;
       themeModeNotifier.value = ThemeMode.values.firstWhere(
@@ -265,6 +267,7 @@ class _KinesisHomeState extends State<KinesisHome> {
         'template': _template,
         'splitRawAndJpeg': _splitRawAndJpeg,
         'vimKeys': _vimKeys,
+        'trashSources': _trashSources,
         'jpegTemplate': _jpegTemplate,
         'cr3Template': _cr3Template,
         'themeMode': themeModeNotifier.value.name,
@@ -671,7 +674,8 @@ class _KinesisHomeState extends State<KinesisHome> {
     final knownHashes = <String>{..._existingHashes};
     final importedAssets = <ImportedAsset>[];
     var skipped = 0;
-    final totalSteps = plan.toImport.length + plan.toDelete.length;
+    final sourcesToTrash = _trashSources ? plan.toDelete : const <MediaFile>[];
+    final totalSteps = plan.toImport.length + sourcesToTrash.length;
     final progress = ValueNotifier(
       _IngestProgress(
         phase: 'Copying and verifying',
@@ -691,12 +695,21 @@ class _KinesisHomeState extends State<KinesisHome> {
     }
 
     _progressOpen = true;
+    setState(() => _ingestProgress = progress);
     final dialogClosed = showDialog<void>(
       context: context,
       barrierDismissible: false,
-      builder: (context) => PopScope(
+      builder: (dialogContext) => PopScope(
         canPop: false,
-        child: _IngestProgressDialog(progress: progress),
+        child: _IngestProgressDialog(
+          progress: progress,
+          onMinimize: () {
+            if (!_progressOpen) return;
+            _progressOpen = false;
+            setState(() => _ingestMinimized = true);
+            Navigator.of(dialogContext, rootNavigator: true).pop();
+          },
+        ),
       ),
     );
     try {
@@ -736,7 +749,7 @@ class _KinesisHomeState extends State<KinesisHome> {
         ),
       );
       await _saveSettings();
-      for (final file in plan.toDelete) {
+      for (final file in sourcesToTrash) {
         progress.value = _IngestProgress(
           phase: 'Moving sources to Trash',
           done: stepsDone,
@@ -786,6 +799,13 @@ class _KinesisHomeState extends State<KinesisHome> {
     } finally {
       _closeProgress(dialogClosed);
       await dialogClosed;
+      if (mounted) {
+        setState(() {
+          _ingestProgress = null;
+          _ingestMinimized = false;
+        });
+        await WidgetsBinding.instance.endOfFrame;
+      }
       progress.dispose();
       _ingesting = false;
       _sourceRefreshPending = false;
@@ -859,13 +879,82 @@ class _KinesisHomeState extends State<KinesisHome> {
         row('Action', const [], header: true),
         row('Copy / verify candidates', plan.toImport),
         row('Already in library (not copied)', alreadyInLibraryFiles),
-        row('Move selected source files to Trash', plan.toDelete),
+        row(
+          _trashSources
+              ? 'Move selected source files to Trash'
+              : 'Move to Trash (off in Settings)',
+          _trashSources ? plan.toDelete : const [],
+        ),
         row('Leave unchanged', unchangedFiles),
       ],
     );
   }
 
   bool _progressOpen = false;
+  bool _ingestMinimized = false;
+  ValueNotifier<_IngestProgress>? _ingestProgress;
+
+  Widget? _minimizedIngestBar() {
+    final progress = _ingestProgress;
+    if (!_ingestMinimized || progress == null) return null;
+    return Material(
+      elevation: 8,
+      child: SafeArea(
+        top: false,
+        child: ValueListenableBuilder<_IngestProgress>(
+          valueListenable: progress,
+          builder: (context, value, _) => Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 160,
+                  child: LinearProgressIndicator(
+                    value: value.fraction,
+                    minHeight: 6,
+                    borderRadius: BorderRadius.circular(3),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    '${value.phase}  ·  ${value.done} / ${value.total}',
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                TextButton(
+                  onPressed: () {
+                    setState(() => _ingestMinimized = false);
+                    _progressOpen = true;
+                    showDialog<void>(
+                      context: context,
+                      barrierDismissible: false,
+                      builder: (dialogContext) => PopScope(
+                        canPop: false,
+                        child: _IngestProgressDialog(
+                          progress: progress,
+                          onMinimize: () {
+                            if (!_progressOpen) return;
+                            _progressOpen = false;
+                            setState(() => _ingestMinimized = true);
+                            Navigator.of(
+                              dialogContext,
+                              rootNavigator: true,
+                            ).pop();
+                          },
+                        ),
+                      ),
+                    );
+                  },
+                  child: const Text('Show'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 
   void _closeProgress(Future<void> dialogClosed) {
     if (!_progressOpen) return;
@@ -977,6 +1066,7 @@ class _KinesisHomeState extends State<KinesisHome> {
     child: Focus(
       autofocus: true,
       child: Scaffold(
+        bottomNavigationBar: _minimizedIngestBar(),
         appBar: AppBar(
           title: Row(
             mainAxisSize: MainAxisSize.min,
@@ -1235,24 +1325,35 @@ class _KinesisHomeState extends State<KinesisHome> {
                         transformationController: _zoomController,
                         maxScale: 8,
                         child: Center(
-                          child: MediaPreview(
-                            preview: preview,
-                            cr3Path: item.cr3?.path,
-                            fit: BoxFit.contain,
-                            cacheWidth: 1600,
-                            loading: const Center(
-                              child: CircularProgressIndicator(strokeWidth: 2),
+                          child: ValueListenableBuilder<Matrix4>(
+                            valueListenable: _zoomController,
+                            builder: (context, matrix, _) => MediaPreview(
+                              preview: preview,
+                              cr3Path: item.cr3?.path,
+                              fit: BoxFit.contain,
+                              // Decode at full resolution once zoomed in.
+                              cacheWidth: matrix.getMaxScaleOnAxis() > 1.01
+                                  ? null
+                                  : 1600,
+                              loading: const Center(
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              ),
+                              placeholder: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(
+                                    Icons.perm_media_outlined,
+                                    size: 96,
+                                  ),
+                                  const SizedBox(height: 16),
+                                  Text(item.displayName),
+                                  const Text('Preview unavailable'),
+                                ],
+                              ),
+                              errorPlaceholder: Text(item.displayName),
                             ),
-                            placeholder: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const Icon(Icons.perm_media_outlined, size: 96),
-                                const SizedBox(height: 16),
-                                Text(item.displayName),
-                                const Text('Preview unavailable'),
-                              ],
-                            ),
-                            errorPlaceholder: Text(item.displayName),
                           ),
                         ),
                       );
@@ -2024,6 +2125,7 @@ class _KinesisHomeState extends State<KinesisHome> {
     final controller = TextEditingController(text: _template);
     var splitRawAndJpeg = _splitRawAndJpeg;
     var vimKeys = _vimKeys;
+    var trashSources = _trashSources;
     final jpegController = TextEditingController(text: _jpegTemplate);
     final cr3Controller = TextEditingController(text: _cr3Template);
     var themeMode = themeModeNotifier.value;
@@ -2113,6 +2215,19 @@ class _KinesisHomeState extends State<KinesisHome> {
                     onChanged: (value) => setDialogState(() => vimKeys = value),
                   ),
                 ),
+                StatefulBuilder(
+                  builder: (context, setDialogState) => SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    value: trashSources,
+                    title: const Text('Move source files to Trash'),
+                    subtitle: const Text(
+                      'After a verified ingest, trash the source files you '
+                      'marked. Turn off to always keep sources.',
+                    ),
+                    onChanged: (value) =>
+                        setDialogState(() => trashSources = value),
+                  ),
+                ),
                 for (final decision in ReviewDecision.values)
                   TextField(
                     controller: keys[decision],
@@ -2159,6 +2274,7 @@ class _KinesisHomeState extends State<KinesisHome> {
       _template = controller.text.trim();
       _splitRawAndJpeg = splitRawAndJpeg;
       _vimKeys = vimKeys;
+      _trashSources = trashSources;
       _jpegTemplate = jpegController.text.trim();
       _cr3Template = cr3Controller.text.trim();
       _shortcuts = {
@@ -2652,13 +2768,23 @@ class _IngestProgress {
 }
 
 class _IngestProgressDialog extends StatelessWidget {
-  const _IngestProgressDialog({required this.progress});
+  const _IngestProgressDialog({
+    required this.progress,
+    required this.onMinimize,
+  });
 
   final ValueListenable<_IngestProgress> progress;
+  final VoidCallback onMinimize;
 
   @override
   Widget build(BuildContext context) => AlertDialog(
     title: const Text('Ingesting'),
+    actions: [
+      TextButton(
+        onPressed: onMinimize,
+        child: const Text('Minimize'),
+      ),
+    ],
     content: SizedBox(
       width: 380,
       child: ValueListenableBuilder<_IngestProgress>(

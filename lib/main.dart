@@ -1087,24 +1087,25 @@ class _KinesisHomeState extends State<KinesisHome> {
             : (_gridMode ? _reviewGrid() : _review()),
         floatingActionButton: _items.isEmpty
             ? null
-            : FloatingActionButton.extended(
+            : FloatingActionButton.small(
                 onPressed: _canRemoveDuplicates
                     ? _removeDuplicates
                     : _decisions.isEmpty
                     ? null
                     : _confirm,
                 tooltip: _canRemoveDuplicates
-                    ? 'Skip JPEGs already in the library and keep missing CR3s'
-                    : 'Review ingest plan',
-                icon: Icon(
-                  _canRemoveDuplicates
-                      ? Icons.delete_sweep_outlined
-                      : Icons.fact_check_outlined,
-                ),
-                label: Text(
-                  _canRemoveDuplicates
-                      ? 'Remove duplicates ($_duplicateCleanupCount)'
-                      : 'Review plan (${_decisions.length})',
+                    ? 'Remove duplicates ($_duplicateCleanupCount): skip JPEGs '
+                          'already in the library and keep missing CR3s'
+                    : 'Review ingest plan (${_decisions.length})',
+                child: Badge(
+                  label: Text(
+                    '${_canRemoveDuplicates ? _duplicateCleanupCount : _decisions.length}',
+                  ),
+                  child: Icon(
+                    _canRemoveDuplicates
+                        ? Icons.delete_sweep_outlined
+                        : Icons.fact_check_outlined,
+                  ),
                 ),
               ),
       ),
@@ -1215,18 +1216,26 @@ class _KinesisHomeState extends State<KinesisHome> {
         (_) => _zoomController.value = Matrix4.identity(),
       );
     }
+    final compact = MediaQuery.sizeOf(context).width < 600;
     return Padding(
-      padding: const EdgeInsets.all(32),
+      padding: compact
+          ? const EdgeInsets.fromLTRB(4, 8, 4, 0)
+          : const EdgeInsets.all(32),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text('${_current + 1} of ${_items.length}'),
-          const SizedBox(height: 16),
+          Text(
+            '${_current + 1} of ${_items.length}',
+            textAlign: TextAlign.center,
+          ),
+          SizedBox(height: compact ? 8 : 16),
           Expanded(
             child: Stack(
               fit: StackFit.expand,
               children: [
                 Card(
+                  margin: compact ? EdgeInsets.zero : null,
+                  color: Colors.black,
                   clipBehavior: Clip.antiAlias,
                   child: LayoutBuilder(
                     builder: (context, constraints) {
@@ -1324,42 +1333,45 @@ class _KinesisHomeState extends State<KinesisHome> {
             style: Theme.of(context).textTheme.bodySmall,
           ),
           const SizedBox(height: 12),
-          Wrap(
-            alignment: WrapAlignment.center,
-            spacing: 12,
-            children: [
-              _action(
-                _shortcuts[ReviewDecision.keepBoth]!,
-                'Keep both',
-                ReviewDecision.keepBoth,
-              ),
-              _action(
-                _shortcuts[ReviewDecision.keepJpeg]!,
-                'Keep JPEG',
-                ReviewDecision.keepJpeg,
-              ),
-              _action(
-                _shortcuts[ReviewDecision.keepCr3]!,
-                'Keep CR3',
-                ReviewDecision.keepCr3,
-              ),
-              _action(
-                _shortcuts[ReviewDecision.deleteBoth]!,
-                'Delete both',
-                ReviewDecision.deleteBoth,
-              ),
-            ],
+          // Leave room at the end of the row for the floating action button.
+          Padding(
+            padding: const EdgeInsets.only(right: _fabClearance, bottom: 8),
+            child: Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 12,
+              runSpacing: 8,
+              children: [
+                _action(
+                  _shortcuts[ReviewDecision.keepBoth]!,
+                  'Keep both',
+                  ReviewDecision.keepBoth,
+                ),
+                _action(
+                  _shortcuts[ReviewDecision.keepJpeg]!,
+                  'Keep JPEG',
+                  ReviewDecision.keepJpeg,
+                ),
+                _action(
+                  _shortcuts[ReviewDecision.keepCr3]!,
+                  'Keep CR3',
+                  ReviewDecision.keepCr3,
+                ),
+                _action(
+                  _shortcuts[ReviewDecision.deleteBoth]!,
+                  'Delete both',
+                  ReviewDecision.deleteBoth,
+                ),
+              ],
+            ),
           ),
-          // Keep the actions clear of the extended floating action button.
-          const SizedBox(height: _fabClearance),
         ],
       ),
     );
   }
 
-  /// Space reserved below content so the floating action button (56px plus
-  /// its 16px margin) never covers it.
-  static const double _fabClearance = 72;
+  /// Width reserved beside the actions so the small floating action button
+  /// (40px plus its 16px margin) never covers them.
+  static const double _fabClearance = 56;
 
   void _zoomBy(double factor) {
     if (_gridMode || _items.isEmpty) return;
@@ -1788,7 +1800,7 @@ class _KinesisHomeState extends State<KinesisHome> {
         ),
         if (_selection.isNotEmpty)
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 16 + _fabClearance),
+            padding: const EdgeInsets.fromLTRB(16, 16, _fabClearance, 8),
             child: Wrap(
               alignment: WrapAlignment.center,
               spacing: 12,

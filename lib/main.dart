@@ -1350,10 +1350,16 @@ class _KinesisHomeState extends State<KinesisHome> {
               ),
             ],
           ),
+          // Keep the actions clear of the extended floating action button.
+          const SizedBox(height: _fabClearance),
         ],
       ),
     );
   }
+
+  /// Space reserved below content so the floating action button (56px plus
+  /// its 16px margin) never covers it.
+  static const double _fabClearance = 72;
 
   void _zoomBy(double factor) {
     if (_gridMode || _items.isEmpty) return;
@@ -1782,7 +1788,7 @@ class _KinesisHomeState extends State<KinesisHome> {
         ),
         if (_selection.isNotEmpty)
           Padding(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 16 + _fabClearance),
             child: Wrap(
               alignment: WrapAlignment.center,
               spacing: 12,

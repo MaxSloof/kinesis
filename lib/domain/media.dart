@@ -1,8 +1,19 @@
 import 'dart:io';
 
+import 'capture_date.dart';
+
 enum MediaKind { jpeg, cr3, image, video }
 
-enum ReviewDecision { keepBoth, keepJpeg, keepCr3, deleteBoth }
+enum ReviewDecision {
+  keepBoth('Keep both'),
+  keepJpeg('Keep JPEG'),
+  keepCr3('Keep CR3'),
+  deleteBoth('Delete both');
+
+  const ReviewDecision(this.label);
+
+  final String label;
+}
 
 String _extensionOf(String name) {
   final dot = name.lastIndexOf('.');
@@ -24,6 +35,7 @@ class MediaFile {
     this.alreadyExists = false,
     this.sizeBytes,
     this.captureDate,
+    this.cameraModel,
   });
 
   final String path;
@@ -38,7 +50,20 @@ class MediaFile {
   final int? sizeBytes;
   final DateTime? captureDate;
 
+  /// Camera make and model from the file's metadata, when it has any.
+  final String? cameraModel;
+
   String get name => displayName ?? File(path).uri.pathSegments.last;
+
+  /// The date this file is filed and labelled under; see [resolveCaptureDate].
+  DateTime? resolvedCaptureDate([
+    CaptureDateAdjustment adjustment = CaptureDateAdjustment.none,
+  ]) => resolveCaptureDate(
+    embedded: captureDate,
+    fileNames: [name],
+    modified: modified,
+    adjustment: adjustment,
+  );
   String get stem => name.substring(0, name.lastIndexOf('.')).toLowerCase();
   String get pairingKey =>
       '${relativePath == null ? File(path).parent.path : _relativeParent(relativePath!)}'
@@ -55,6 +80,7 @@ class MediaFile {
     alreadyExists: alreadyExists,
     sizeBytes: sizeBytes,
     captureDate: captureDate,
+    cameraModel: cameraModel,
   );
 
   MediaFile withExistingStatus(bool value) => MediaFile(
@@ -69,6 +95,7 @@ class MediaFile {
     alreadyExists: value,
     sizeBytes: sizeBytes,
     captureDate: captureDate,
+    cameraModel: cameraModel,
   );
 }
 
@@ -108,17 +135,34 @@ class ReviewItem {
   }
 
   /// Compact format labels for the badge row, e.g. `JPEG` and `CR3` for a
-  /// pair, or the file extension for a single image or video.
+  /// pair (or the RAW's own extension), or the file extension for a single image or video.
   List<String> get formats => [
     if (jpeg != null) 'JPEG',
-    if (cr3 != null) 'CR3',
+    if (cr3 != null) _extensionOf(cr3!.name),
     for (final file in files)
       if (file.kind == MediaKind.image || file.kind == MediaKind.video)
         _extensionOf(file.name),
   ].where((format) => format.isNotEmpty).toList();
 
-  DateTime? get captureDate =>
-      jpeg?.captureDate ?? cr3?.captureDate ?? single?.captureDate;
+  DateTime? get captureDate => resolvedCaptureDate();
+
+  String? get cameraModel =>
+      [jpeg, cr3, single].map((file) => file?.cameraModel).nonNulls.firstOrNull;
+
+  /// One date for every file of the item, so a JPEG and its CR3 land in the
+  /// same folder.
+  DateTime? resolvedCaptureDate([
+    CaptureDateAdjustment adjustment = CaptureDateAdjustment.none,
+  ]) {
+    final media = [jpeg, cr3, single].whereType<MediaFile>().toList();
+    return resolveCaptureDate(
+      embedded: media.map((file) => file.captureDate).nonNulls.firstOrNull,
+      fileNames: media.map((file) => file.name),
+      modified: media.map((file) => file.modified).nonNulls.firstOrNull,
+      adjustment: adjustment,
+    );
+  }
+
   int? get sizeBytes {
     final media = files;
     if (media.any((file) => file.sizeBytes == null)) return null;

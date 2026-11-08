@@ -10,14 +10,20 @@ import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'domain/import_options.dart';
+import 'domain/ingest_progress.dart';
 import 'domain/media.dart';
 import 'domain/selection.dart';
 import 'domain/view_options.dart';
 import 'services/cr3_preview.dart';
+import 'services/free_space.dart';
 import 'services/media_service.dart';
 import 'services/saf_storage.dart';
 import 'shortcuts.dart';
+import 'widgets/camera_card_picks.dart';
+import 'widgets/import_options_dialog.dart';
 import 'widgets/media_preview.dart';
+import 'widgets/welcome_guide.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -80,6 +86,8 @@ class _KinesisHomeState extends State<KinesisHome> {
   String _template = '{year}/{year}-{month}-{day}';
   bool _splitRawAndJpeg = false;
   bool _vimKeys = true;
+  bool _trashSources = true;
+  bool _welcomeGuideSeen = false;
   String _jpegTemplate = 'JPEG/{year}/{year}-{month}-{day}';
   String _cr3Template = 'CRAW/{year}/{year}-{month}-{day}';
   Map<ReviewDecision, String> _shortcuts = {
@@ -106,6 +114,9 @@ class _KinesisHomeState extends State<KinesisHome> {
   bool _refreshingSource = false;
   bool _sourceRefreshPending = false;
   bool _ingesting = false;
+
+  /// Applies to the current import only; never saved.
+  ImportOptions _importOptions = ImportOptions.none;
   final _selection = MediaSelection();
 
   @override
@@ -181,6 +192,38 @@ class _KinesisHomeState extends State<KinesisHome> {
 
   void _toggleDateGrouping() => setState(() => _groupByDate = !_groupByDate);
 
+  Widget _helpMenu() => PopupMenuButton<VoidCallback>(
+    tooltip: 'Help',
+    icon: const Icon(Icons.help_outline),
+    onSelected: (action) => action(),
+    itemBuilder: (context) => [
+      PopupMenuItem(
+        value: _showWelcomeGuide,
+        child: const ListTile(
+          leading: Icon(Icons.school_outlined),
+          title: Text('Replay welcome guide'),
+        ),
+      ),
+      PopupMenuItem(
+        value: _openHelp,
+        child: const ListTile(
+          leading: Icon(Icons.open_in_new),
+          title: Text('Open on GitHub'),
+        ),
+      ),
+    ],
+  );
+
+  Future<void> _showWelcomeGuide() async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) => const WelcomeGuide(),
+    );
+    if (_welcomeGuideSeen) return;
+    _welcomeGuideSeen = true;
+    await _saveSettings();
+  }
+
   Future<void> _openHelp() async {
     if (await launchUrl(_readmeUri, mode: LaunchMode.externalApplication)) {
       return;
@@ -213,6 +256,8 @@ class _KinesisHomeState extends State<KinesisHome> {
       _template = state['template'] as String? ?? _template;
       _splitRawAndJpeg = state['splitRawAndJpeg'] as bool? ?? false;
       _vimKeys = state['vimKeys'] as bool? ?? true;
+      _trashSources = state['trashSources'] as bool? ?? true;
+      _welcomeGuideSeen = state['welcomeGuideSeen'] as bool? ?? false;
       _jpegTemplate = state['jpegTemplate'] as String? ?? _jpegTemplate;
       _cr3Template = state['cr3Template'] as String? ?? _cr3Template;
       themeModeNotifier.value = ThemeMode.values.firstWhere(
@@ -235,6 +280,7 @@ class _KinesisHomeState extends State<KinesisHome> {
           .map((asset) => ImportedAsset.fromJson(asset as Map<String, dynamic>))
           .toList();
     });
+    if (!_welcomeGuideSeen) unawaited(_showWelcomeGuide());
     await _refreshLibraryIndex();
   }
 
@@ -243,7 +289,9 @@ class _KinesisHomeState extends State<KinesisHome> {
     if (library == null) return;
     try {
       final hashes = await Future.wait(
-        _indexRoots(library).map(_media.loadLibraryHashes),
+        _indexRoots(library).map(
+          (root) => _media.loadLibraryHashes(root, candidateSizes: const {}),
+        ),
       );
       if (!mounted) return;
       setState(() {
@@ -265,6 +313,8 @@ class _KinesisHomeState extends State<KinesisHome> {
         'template': _template,
         'splitRawAndJpeg': _splitRawAndJpeg,
         'vimKeys': _vimKeys,
+        'trashSources': _trashSources,
+        'welcomeGuideSeen': _welcomeGuideSeen,
         'jpegTemplate': _jpegTemplate,
         'cr3Template': _cr3Template,
         'themeMode': themeModeNotifier.value.name,
@@ -303,6 +353,11 @@ class _KinesisHomeState extends State<KinesisHome> {
             dialogTitle: 'Choose a camera card or source folder',
           );
     if (selected == null) return;
+    await _openSource(selected);
+  }
+
+  Future<void> _openSource(String selected) async {
+    _importOptions = ImportOptions.none;
     final previousSource = _source;
     _source = selected;
     _sourceRefreshTimer?.cancel();
@@ -325,19 +380,7 @@ class _KinesisHomeState extends State<KinesisHome> {
         '$sourceFileCount files in ${scanned.length} review items',
       );
       final libraryWatch = Stopwatch()..start();
-      final libraryHashesBySize = <int, Set<String>>{};
-      if (_library != null) {
-        final indexes = await Future.wait(
-          _indexRoots(_library!).map(_media.libraryHashesBySize),
-        );
-        for (final index in indexes) {
-          for (final entry in index.entries) {
-            libraryHashesBySize
-                .putIfAbsent(entry.key, () => {})
-                .addAll(entry.value);
-          }
-        }
-      }
+      final libraryHashesBySize = await _libraryHashesFor(scanned);
       libraryWatch.stop();
       final libraryFileCount = libraryHashesBySize.values.fold<int>(
         0,
@@ -450,18 +493,7 @@ class _KinesisHomeState extends State<KinesisHome> {
     _refreshingSource = true;
     try {
       final scanned = await _media.scan(source);
-      final hashesBySize = <int, Set<String>>{};
-      final library = _library;
-      if (library != null) {
-        final indexes = await Future.wait(
-          _indexRoots(library).map(_media.libraryHashesBySize),
-        );
-        for (final index in indexes) {
-          for (final entry in index.entries) {
-            hashesBySize.putIfAbsent(entry.key, () => {}).addAll(entry.value);
-          }
-        }
-      }
+      final hashesBySize = await _libraryHashesFor(scanned);
       final refreshed = _attachLibraryJpegs(
         await _media.markExisting(scanned, hashesBySize),
         await _libraryJpegs(),
@@ -610,6 +642,21 @@ class _KinesisHomeState extends State<KinesisHome> {
         if (index < _items.length)
           ..._items[index].files.where((file) => file.alreadyExists),
     ];
+    // A JPEG and its CR3 are filed under one date.
+    final camerasByPath = <String, String?>{
+      for (final index in _decisions.keys)
+        if (index < _items.length)
+          for (final file in _items[index].files)
+            file.path: _items[index].cameraModel,
+    };
+    final datesByPath = <String, DateTime?>{
+      for (final index in _decisions.keys)
+        if (index < _items.length)
+          for (final file in _items[index].files)
+            file.path: _items[index].resolvedCaptureDate(
+              _importOptions.dateAdjustment,
+            ),
+    };
     final duplicateFiles = alreadyInLibraryFiles.length;
     final libraryJpegReferences = _decisions.keys
         .where((index) => index < _items.length)
@@ -628,27 +675,35 @@ class _KinesisHomeState extends State<KinesisHome> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
-                  'Only files in “Copy / verify candidates” can be written to '
-                  'the library. Source files listed for Trash are a separate '
-                  'action and move after copies are verified.',
+                  'Kinesis moves source files to Trash only after their '
+                  'copies are verified.',
                 ),
                 const SizedBox(height: 16),
                 _ingestPlanTable(plan, alreadyInLibraryFiles, unchangedFiles),
+                if (_importOptions.isActive) ...[
+                  const SizedBox(height: 16),
+                  Text(
+                    [
+                      ?_importOptions.dateAdjustment.description,
+                      if (_importOptions.shoot.trim().isNotEmpty)
+                        'Shoot name: ${_importOptions.shoot.trim()}',
+                    ].join('. '),
+                  ),
+                  const Text('Kinesis does not change the source files.'),
+                ],
                 if (libraryJpegReferences > 0) ...[
                   const SizedBox(height: 16),
                   Text(
-                    '$libraryJpegReferences matching '
-                    '${libraryJpegReferences == 1 ? 'JPEG' : 'JPEGs'} in the '
-                    'library '
-                    '${libraryJpegReferences == 1 ? 'is' : 'are'} '
-                    'preview-only; they will not be copied or moved.',
+                    'Kinesis leaves the $libraryJpegReferences matching '
+                    '${libraryJpegReferences == 1 ? 'JPEG' : 'JPEGs'} already '
+                    'in the library unchanged.',
                   ),
                 ],
                 const SizedBox(height: 12),
                 const Text(
-                  'If multiple selected source files have identical content, '
-                  'only the first is copied; later copies are skipped. Files '
-                  'with no decision remain unchanged.',
+                  'When selected source files have identical content, Kinesis '
+                  'copies only the first. Files without a decision stay '
+                  'unchanged.',
                 ),
               ],
             ),
@@ -667,50 +722,95 @@ class _KinesisHomeState extends State<KinesisHome> {
       ),
     );
     if (approved != true || !mounted) return;
+    final space = await checkFreeSpace(
+      library: _library!,
+      requiredBytes: totalBytes(plan.toImport),
+    );
+    if (!mounted) return;
+    if (!space.isEnough) {
+      await showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Not enough space'),
+          content: Text(
+            '${space.message} Free up space or choose another library, then '
+            'try again. Nothing was copied.',
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
     _ingesting = true;
     final knownHashes = <String>{..._existingHashes};
     final importedAssets = <ImportedAsset>[];
     var skipped = 0;
-    final totalSteps = plan.toImport.length + plan.toDelete.length;
+    final sourcesToTrash = _trashSources ? plan.toDelete : const <MediaFile>[];
+    final totalSteps = plan.toImport.length + sourcesToTrash.length;
+    final bytesTotal = totalBytes(plan.toImport);
+    var bytesDone = 0;
     final progress = ValueNotifier(
-      _IngestProgress(
-        phase: 'Copying and verifying',
+      IngestProgress(
+        phase: IngestProgress.copyPhase,
         done: 0,
         total: totalSteps,
+        copyTotal: plan.toImport.length,
+        bytesTotal: bytesTotal,
       ),
     );
     var stepsDone = 0;
-    void step(String phase, String? file) {
+    void step(String phase, MediaFile file) {
       stepsDone++;
-      progress.value = _IngestProgress(
+      if (phase == IngestProgress.copyPhase) bytesDone += file.sizeBytes ?? 0;
+      progress.value = IngestProgress(
         phase: phase,
         done: stepsDone,
         total: totalSteps,
-        currentFile: file,
+        copyTotal: plan.toImport.length,
+        bytesDone: bytesDone,
+        bytesTotal: bytesTotal,
+        currentFile: file.name,
       );
     }
 
     _progressOpen = true;
+    setState(() => _ingestProgress = progress);
     final dialogClosed = showDialog<void>(
       context: context,
       barrierDismissible: false,
-      builder: (context) => PopScope(
+      builder: (dialogContext) => PopScope(
         canPop: false,
-        child: _IngestProgressDialog(progress: progress),
+        child: _IngestProgressDialog(
+          progress: progress,
+          onMinimize: () {
+            if (!_progressOpen) return;
+            _progressOpen = false;
+            setState(() => _ingestMinimized = true);
+            Navigator.of(dialogContext, rootNavigator: true).pop();
+          },
+        ),
       ),
     );
     try {
       for (final file in plan.toImport) {
-        progress.value = _IngestProgress(
-          phase: 'Copying and verifying',
+        progress.value = IngestProgress(
+          phase: IngestProgress.copyPhase,
           done: stepsDone,
           total: totalSteps,
+          copyTotal: plan.toImport.length,
+          bytesDone: bytesDone,
+          bytesTotal: bytesTotal,
           currentFile: file.name,
         );
         final sourceHash = await _media.hashFile(file.path);
         if (!knownHashes.add(sourceHash)) {
           skipped++;
-          step('Copying and verifying', file.name);
+          step(IngestProgress.copyPhase, file);
           continue;
         }
         importedAssets.add(
@@ -718,14 +818,21 @@ class _KinesisHomeState extends State<KinesisHome> {
             file.withHash(sourceHash),
             _library!,
             _templateFor(file),
+            captureDate: datesByPath[file.path],
+            adjustment: _importOptions.dateAdjustment,
+            shoot: _importOptions.shoot,
+            cameraModel: camerasByPath[file.path],
           ),
         );
-        step('Copying and verifying', file.name);
+        step(IngestProgress.copyPhase, file);
       }
-      progress.value = _IngestProgress(
+      progress.value = IngestProgress(
         phase: 'Updating library index',
         done: stepsDone,
         total: totalSteps,
+        copyTotal: plan.toImport.length,
+        bytesDone: bytesDone,
+        bytesTotal: bytesTotal,
       );
       _existingHashes.addAll(importedAssets.map((asset) => asset.hash));
       _libraryAssets.addAll(importedAssets);
@@ -736,18 +843,22 @@ class _KinesisHomeState extends State<KinesisHome> {
         ),
       );
       await _saveSettings();
-      for (final file in plan.toDelete) {
-        progress.value = _IngestProgress(
+      for (final file in sourcesToTrash) {
+        progress.value = IngestProgress(
           phase: 'Moving sources to Trash',
           done: stepsDone,
           total: totalSteps,
+          copyTotal: plan.toImport.length,
+          bytesDone: bytesDone,
+          bytesTotal: bytesTotal,
           currentFile: file.name,
         );
         await _trash.moveToTrash(file);
-        step('Moving sources to Trash', file.name);
+        step('Moving sources to Trash', file);
       }
       _closeProgress(dialogClosed);
       if (mounted) {
+        setState(() => _importOptions = ImportOptions.none);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
@@ -786,6 +897,13 @@ class _KinesisHomeState extends State<KinesisHome> {
     } finally {
       _closeProgress(dialogClosed);
       await dialogClosed;
+      if (mounted) {
+        setState(() {
+          _ingestProgress = null;
+          _ingestMinimized = false;
+        });
+        await WidgetsBinding.instance.endOfFrame;
+      }
       progress.dispose();
       _ingesting = false;
       _sourceRefreshPending = false;
@@ -808,7 +926,7 @@ class _KinesisHomeState extends State<KinesisHome> {
       final cr3Count = files.where((file) => file.kind == MediaKind.cr3).length;
       final otherCount = files.length - jpegCount - cr3Count;
       final values = header
-          ? [action, 'JPEG', 'CR3', 'Other', 'Total']
+          ? [action, 'JPEG', 'RAW', 'Other', 'Total']
           : [
               action,
               '$jpegCount',
@@ -859,13 +977,83 @@ class _KinesisHomeState extends State<KinesisHome> {
         row('Action', const [], header: true),
         row('Copy / verify candidates', plan.toImport),
         row('Already in library (not copied)', alreadyInLibraryFiles),
-        row('Move selected source files to Trash', plan.toDelete),
+        row(
+          _trashSources
+              ? 'Move selected source files to Trash'
+              : 'Move to Trash (off in Settings)',
+          _trashSources ? plan.toDelete : const [],
+        ),
         row('Leave unchanged', unchangedFiles),
       ],
     );
   }
 
   bool _progressOpen = false;
+  bool _ingestMinimized = false;
+  ValueNotifier<IngestProgress>? _ingestProgress;
+
+  Widget? _minimizedIngestBar() {
+    final progress = _ingestProgress;
+    if (!_ingestMinimized || progress == null) return null;
+    return Material(
+      elevation: 8,
+      child: SafeArea(
+        top: false,
+        child: ValueListenableBuilder<IngestProgress>(
+          valueListenable: progress,
+          builder: (context, value, _) => Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 160,
+                  child: LinearProgressIndicator(
+                    value: value.fraction,
+                    minHeight: 6,
+                    borderRadius: BorderRadius.circular(3),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    '${value.phase}  ·  ${value.filesLabel}'
+                    '${value.bytesLabel == null ? '' : '  ·  ${value.bytesLabel}'}',
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                TextButton(
+                  onPressed: () {
+                    setState(() => _ingestMinimized = false);
+                    _progressOpen = true;
+                    showDialog<void>(
+                      context: context,
+                      barrierDismissible: false,
+                      builder: (dialogContext) => PopScope(
+                        canPop: false,
+                        child: _IngestProgressDialog(
+                          progress: progress,
+                          onMinimize: () {
+                            if (!_progressOpen) return;
+                            _progressOpen = false;
+                            setState(() => _ingestMinimized = true);
+                            Navigator.of(
+                              dialogContext,
+                              rootNavigator: true,
+                            ).pop();
+                          },
+                        ),
+                      ),
+                    );
+                  },
+                  child: const Text('Show'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 
   void _closeProgress(Future<void> dialogClosed) {
     if (!_progressOpen) return;
@@ -880,6 +1068,28 @@ class _KinesisHomeState extends State<KinesisHome> {
       MediaKind.cr3 => _cr3Template,
       _ => _template,
     };
+  }
+
+  /// Library hashes for files the same size as a source file; only those can
+  /// be duplicates, so the rest of the library is never read.
+  Future<Map<int, Set<String>>> _libraryHashesFor(
+    List<ReviewItem> scanned,
+  ) async {
+    final merged = <int, Set<String>>{};
+    final library = _library;
+    if (library == null) return merged;
+    final sizes = await _media.sourceSizes(scanned);
+    final indexes = await Future.wait(
+      _indexRoots(
+        library,
+      ).map((root) => _media.libraryHashesBySize(root, candidateSizes: sizes)),
+    );
+    for (final index in indexes) {
+      for (final entry in index.entries) {
+        merged.putIfAbsent(entry.key, () => {}).addAll(entry.value);
+      }
+    }
+    return merged;
   }
 
   Iterable<String> _indexRoots(String library) => {
@@ -977,6 +1187,7 @@ class _KinesisHomeState extends State<KinesisHome> {
     child: Focus(
       autofocus: true,
       child: Scaffold(
+        bottomNavigationBar: _minimizedIngestBar(),
         appBar: AppBar(
           title: Row(
             mainAxisSize: MainAxisSize.min,
@@ -1002,11 +1213,7 @@ class _KinesisHomeState extends State<KinesisHome> {
           actions: MediaQuery.sizeOf(context).width < 700
               ? _compactAppBarActions()
               : [
-                  IconButton(
-                    onPressed: _openHelp,
-                    icon: const Icon(Icons.help_outline),
-                    tooltip: 'Help',
-                  ),
+                  _helpMenu(),
                   IconButton(
                     onPressed: _showSettings,
                     icon: const Icon(Icons.settings_outlined),
@@ -1018,6 +1225,15 @@ class _KinesisHomeState extends State<KinesisHome> {
                     tooltip: 'Library',
                   ),
                   if (_items.isNotEmpty) ...[
+                    IconButton(
+                      onPressed: _showImportOptions,
+                      icon: Badge(
+                        isLabelVisible: _importOptions.isActive,
+                        smallSize: 8,
+                        child: const Icon(Icons.tune_outlined),
+                      ),
+                      tooltip: 'Import options',
+                    ),
                     IconButton(
                       onPressed: () => setState(() {
                         _gridMode = !_gridMode;
@@ -1087,24 +1303,25 @@ class _KinesisHomeState extends State<KinesisHome> {
             : (_gridMode ? _reviewGrid() : _review()),
         floatingActionButton: _items.isEmpty
             ? null
-            : FloatingActionButton.extended(
+            : FloatingActionButton.small(
                 onPressed: _canRemoveDuplicates
                     ? _removeDuplicates
                     : _decisions.isEmpty
                     ? null
                     : _confirm,
                 tooltip: _canRemoveDuplicates
-                    ? 'Skip JPEGs already in the library and keep missing CR3s'
-                    : 'Review ingest plan',
-                icon: Icon(
-                  _canRemoveDuplicates
-                      ? Icons.delete_sweep_outlined
-                      : Icons.fact_check_outlined,
-                ),
-                label: Text(
-                  _canRemoveDuplicates
-                      ? 'Remove duplicates ($_duplicateCleanupCount)'
-                      : 'Review plan (${_decisions.length})',
+                    ? 'Remove duplicates ($_duplicateCleanupCount): skip JPEGs '
+                          'already in the library and keep missing CR3s'
+                    : 'Review ingest plan (${_decisions.length})',
+                child: Badge(
+                  label: Text(
+                    '${_canRemoveDuplicates ? _duplicateCleanupCount : _decisions.length}',
+                  ),
+                  child: Icon(
+                    _canRemoveDuplicates
+                        ? Icons.delete_sweep_outlined
+                        : Icons.fact_check_outlined,
+                  ),
                 ),
               ),
       ),
@@ -1112,11 +1329,7 @@ class _KinesisHomeState extends State<KinesisHome> {
   );
 
   List<Widget> _compactAppBarActions() => [
-    IconButton(
-      onPressed: _openHelp,
-      icon: const Icon(Icons.help_outline),
-      tooltip: 'Help',
-    ),
+    _helpMenu(),
     PopupMenuButton<String>(
       tooltip: 'More options',
       icon: const Icon(Icons.more_vert),
@@ -1124,6 +1337,8 @@ class _KinesisHomeState extends State<KinesisHome> {
         switch (action) {
           case 'settings':
             _showSettings();
+          case 'importOptions':
+            _showImportOptions();
           case 'library':
             _showLibrary();
           case 'chooseLibrary':
@@ -1151,6 +1366,14 @@ class _KinesisHomeState extends State<KinesisHome> {
         const PopupMenuItem(value: 'library', child: Text('Open library')),
         const PopupMenuItem(value: 'settings', child: Text('Settings')),
         if (_items.isNotEmpty) ...[
+          PopupMenuItem(
+            value: 'importOptions',
+            child: Text(
+              _importOptions.isActive
+                  ? 'Import options (set)…'
+                  : 'Import options…',
+            ),
+          ),
           PopupMenuItem(
             value: 'toggleGrid',
             child: Text(_gridMode ? 'Single image review' : 'Grid review'),
@@ -1186,12 +1409,9 @@ class _KinesisHomeState extends State<KinesisHome> {
         const Icon(Icons.add_to_photos_outlined, size: 64),
         const SizedBox(height: 16),
         const Text(
-          'Ingest media you can trust',
+          'Review camera files, verify copies, then trash the sources',
           style: TextStyle(fontSize: 24, fontWeight: FontWeight.w600),
-        ),
-        const SizedBox(height: 8),
-        const Text(
-          'Review camera files, verify copies, then clean the source.',
+          textAlign: TextAlign.center,
         ),
         const SizedBox(height: 24),
         FilledButton.icon(
@@ -1199,6 +1419,10 @@ class _KinesisHomeState extends State<KinesisHome> {
           icon: const Icon(Icons.folder_open),
           label: Text(_scanning ? 'Scanning...' : 'Choose source folder'),
         ),
+        if (!Platform.isAndroid && !Platform.isIOS) ...[
+          const SizedBox(height: 16),
+          CameraCardPicks(enabled: !_scanning, onSelected: _openSource),
+        ],
       ],
     ),
   );
@@ -1215,18 +1439,26 @@ class _KinesisHomeState extends State<KinesisHome> {
         (_) => _zoomController.value = Matrix4.identity(),
       );
     }
+    final compact = MediaQuery.sizeOf(context).width < 600;
     return Padding(
-      padding: const EdgeInsets.all(32),
+      padding: compact
+          ? const EdgeInsets.fromLTRB(4, 8, 4, 0)
+          : const EdgeInsets.all(32),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text('${_current + 1} of ${_items.length}'),
-          const SizedBox(height: 16),
+          Text(
+            '${_current + 1} of ${_items.length}',
+            textAlign: TextAlign.center,
+          ),
+          SizedBox(height: compact ? 8 : 16),
           Expanded(
             child: Stack(
               fit: StackFit.expand,
               children: [
                 Card(
+                  margin: compact ? EdgeInsets.zero : null,
+                  color: Colors.black,
                   clipBehavior: Clip.antiAlias,
                   child: LayoutBuilder(
                     builder: (context, constraints) {
@@ -1235,24 +1467,35 @@ class _KinesisHomeState extends State<KinesisHome> {
                         transformationController: _zoomController,
                         maxScale: 8,
                         child: Center(
-                          child: MediaPreview(
-                            preview: preview,
-                            cr3Path: item.cr3?.path,
-                            fit: BoxFit.contain,
-                            cacheWidth: 1600,
-                            loading: const Center(
-                              child: CircularProgressIndicator(strokeWidth: 2),
+                          child: ValueListenableBuilder<Matrix4>(
+                            valueListenable: _zoomController,
+                            builder: (context, matrix, _) => MediaPreview(
+                              preview: preview,
+                              cr3Path: item.cr3?.path,
+                              fit: BoxFit.contain,
+                              // Decode at full resolution once zoomed in.
+                              cacheWidth: matrix.getMaxScaleOnAxis() > 1.01
+                                  ? null
+                                  : 1600,
+                              loading: const Center(
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              ),
+                              placeholder: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(
+                                    Icons.perm_media_outlined,
+                                    size: 96,
+                                  ),
+                                  const SizedBox(height: 16),
+                                  Text(item.displayName),
+                                  const Text('Preview unavailable'),
+                                ],
+                              ),
+                              errorPlaceholder: Text(item.displayName),
                             ),
-                            placeholder: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const Icon(Icons.perm_media_outlined, size: 96),
-                                const SizedBox(height: 16),
-                                Text(item.displayName),
-                                const Text('Preview unavailable'),
-                              ],
-                            ),
-                            errorPlaceholder: Text(item.displayName),
                           ),
                         ),
                       );
@@ -1319,41 +1562,50 @@ class _KinesisHomeState extends State<KinesisHome> {
             ),
           const SizedBox(height: 4),
           Text(
-            '${MediaViewOrder.captureDateLabel(item.captureDate)}  ·  '
+            '${MediaViewOrder.captureDateLabel(item.resolvedCaptureDate(_importOptions.dateAdjustment))}  ·  '
             '${MediaViewOrder.sizeLabel(item.sizeBytes)}',
             style: Theme.of(context).textTheme.bodySmall,
           ),
           const SizedBox(height: 12),
-          Wrap(
-            alignment: WrapAlignment.center,
-            spacing: 12,
-            children: [
-              _action(
-                _shortcuts[ReviewDecision.keepBoth]!,
-                'Keep both',
-                ReviewDecision.keepBoth,
-              ),
-              _action(
-                _shortcuts[ReviewDecision.keepJpeg]!,
-                'Keep JPEG',
-                ReviewDecision.keepJpeg,
-              ),
-              _action(
-                _shortcuts[ReviewDecision.keepCr3]!,
-                'Keep CR3',
-                ReviewDecision.keepCr3,
-              ),
-              _action(
-                _shortcuts[ReviewDecision.deleteBoth]!,
-                'Delete both',
-                ReviewDecision.deleteBoth,
-              ),
-            ],
+          // Leave room at the end of the row for the floating action button.
+          Padding(
+            padding: const EdgeInsets.only(right: _fabClearance, bottom: 8),
+            child: Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 12,
+              runSpacing: 8,
+              children: [
+                _action(
+                  _shortcuts[ReviewDecision.keepBoth]!,
+                  'Keep both',
+                  ReviewDecision.keepBoth,
+                ),
+                _action(
+                  _shortcuts[ReviewDecision.keepJpeg]!,
+                  'Keep JPEG',
+                  ReviewDecision.keepJpeg,
+                ),
+                _action(
+                  _shortcuts[ReviewDecision.keepCr3]!,
+                  'Keep CR3',
+                  ReviewDecision.keepCr3,
+                ),
+                _action(
+                  _shortcuts[ReviewDecision.deleteBoth]!,
+                  'Delete both',
+                  ReviewDecision.deleteBoth,
+                ),
+              ],
+            ),
           ),
         ],
       ),
     );
   }
+
+  /// Width reserved beside the actions so the small floating action button
+  /// (40px plus its 16px margin) never covers them.
+  static const double _fabClearance = 56;
 
   void _zoomBy(double factor) {
     if (_gridMode || _items.isEmpty) return;
@@ -1376,7 +1628,8 @@ class _KinesisHomeState extends State<KinesisHome> {
   List<MediaDateGroup<int>> _gridGroups() => _groupByDate
       ? MediaViewOrder.groupByCaptureDate<int>(
           _displayOrder,
-          (index) => _items[index].captureDate,
+          (index) =>
+              _items[index].resolvedCaptureDate(_importOptions.dateAdjustment),
           newestFirst: _sortOrder != MediaSortOrder.captureOldest,
         )
       : [MediaDateGroup(label: '', items: _displayOrder)];
@@ -1689,7 +1942,9 @@ class _KinesisHomeState extends State<KinesisHome> {
     final groups = _groupByDate
         ? MediaViewOrder.groupByCaptureDate<int>(
             visibleOrder,
-            (index) => _items[index].captureDate,
+            (index) => _items[index].resolvedCaptureDate(
+              _importOptions.dateAdjustment,
+            ),
             newestFirst: _sortOrder != MediaSortOrder.captureOldest,
           )
         : [MediaDateGroup(label: '', items: visibleOrder)];
@@ -1782,7 +2037,7 @@ class _KinesisHomeState extends State<KinesisHome> {
         ),
         if (_selection.isNotEmpty)
           Padding(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.fromLTRB(16, 16, _fabClearance, 8),
             child: Wrap(
               alignment: WrapAlignment.center,
               spacing: 12,
@@ -1986,26 +2241,12 @@ class _KinesisHomeState extends State<KinesisHome> {
             children: [
               Icon(icon, color: foreground, size: 22),
               const SizedBox(width: 10),
-              Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'SELECTED ACTION',
-                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                      color: foreground,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 0.8,
-                    ),
-                  ),
-                  Text(
-                    _selectedActionLabel(decision),
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      color: foreground,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ],
+              Text(
+                _selectedActionLabel(decision),
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  color: foreground,
+                  fontWeight: FontWeight.w700,
+                ),
               ),
             ],
           ),
@@ -2020,10 +2261,20 @@ class _KinesisHomeState extends State<KinesisHome> {
         child: Text('$key  $label'),
       );
 
+  Future<void> _showImportOptions() async {
+    final options = await showDialog<ImportOptions>(
+      context: context,
+      builder: (context) => ImportOptionsDialog(initial: _importOptions),
+    );
+    if (options == null || !mounted) return;
+    setState(() => _importOptions = options);
+  }
+
   Future<void> _showSettings() async {
     final controller = TextEditingController(text: _template);
     var splitRawAndJpeg = _splitRawAndJpeg;
     var vimKeys = _vimKeys;
+    var trashSources = _trashSources;
     final jpegController = TextEditingController(text: _jpegTemplate);
     final cr3Controller = TextEditingController(text: _cr3Template);
     var themeMode = themeModeNotifier.value;
@@ -2069,8 +2320,10 @@ class _KinesisHomeState extends State<KinesisHome> {
                   controller: controller,
                   decoration: const InputDecoration(
                     labelText: 'Destination template',
+                    helperMaxLines: 3,
                     helperText:
-                        'Tokens: {year}, {month}, {day}, {originalName}, {sourceFolder}',
+                        'Tokens: {year}, {month}, {day}, {originalName}, {sourceFolder}, '
+                        '{shoot}, {camera}, {ext}',
                   ),
                 ),
                 StatefulBuilder(
@@ -2113,13 +2366,27 @@ class _KinesisHomeState extends State<KinesisHome> {
                     onChanged: (value) => setDialogState(() => vimKeys = value),
                   ),
                 ),
+                StatefulBuilder(
+                  builder: (context, setDialogState) => SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    value: trashSources,
+                    title: const Text('Move source files to Trash'),
+                    subtitle: const Text(
+                      'After a verified ingest, trash the source files you '
+                      'marked.',
+                    ),
+                    onChanged: (value) =>
+                        setDialogState(() => trashSources = value),
+                  ),
+                ),
                 for (final decision in ReviewDecision.values)
                   TextField(
                     controller: keys[decision],
                     maxLength: 1,
                     textCapitalization: TextCapitalization.characters,
                     decoration: InputDecoration(
-                      labelText: '${decision.name} shortcut',
+                      labelText: '${decision.label} shortcut',
+                      counterText: '',
                     ),
                   ),
               ],
@@ -2159,6 +2426,7 @@ class _KinesisHomeState extends State<KinesisHome> {
       _template = controller.text.trim();
       _splitRawAndJpeg = splitRawAndJpeg;
       _vimKeys = vimKeys;
+      _trashSources = trashSources;
       _jpegTemplate = jpegController.text.trim();
       _cr3Template = cr3Controller.text.trim();
       _shortcuts = {
@@ -2635,33 +2903,22 @@ Widget _formatBadges(ReviewItem item) {
   );
 }
 
-class _IngestProgress {
-  const _IngestProgress({
-    required this.phase,
-    required this.done,
-    required this.total,
-    this.currentFile,
+class _IngestProgressDialog extends StatelessWidget {
+  const _IngestProgressDialog({
+    required this.progress,
+    required this.onMinimize,
   });
 
-  final String phase;
-  final int done;
-  final int total;
-  final String? currentFile;
-
-  double? get fraction => total == 0 ? null : done / total;
-}
-
-class _IngestProgressDialog extends StatelessWidget {
-  const _IngestProgressDialog({required this.progress});
-
-  final ValueListenable<_IngestProgress> progress;
+  final ValueListenable<IngestProgress> progress;
+  final VoidCallback onMinimize;
 
   @override
   Widget build(BuildContext context) => AlertDialog(
     title: const Text('Ingesting'),
+    actions: [TextButton(onPressed: onMinimize, child: const Text('Minimize'))],
     content: SizedBox(
       width: 380,
-      child: ValueListenableBuilder<_IngestProgress>(
+      child: ValueListenableBuilder<IngestProgress>(
         valueListenable: progress,
         builder: (context, value, _) {
           final theme = Theme.of(context);
@@ -2694,12 +2951,16 @@ class _IngestProgressDialog extends StatelessWidget {
                   ),
                   const SizedBox(width: 12),
                   Text(
-                    '${value.done} / ${value.total}'
+                    '${value.filesLabel}'
                     '${fraction == null ? '' : '  ·  ${(fraction * 100).round()}%'}',
                     style: theme.textTheme.bodySmall,
                   ),
                 ],
               ),
+              if (value.bytesLabel != null) ...[
+                const SizedBox(height: 4),
+                Text(value.bytesLabel!, style: theme.textTheme.bodySmall),
+              ],
             ],
           );
         },

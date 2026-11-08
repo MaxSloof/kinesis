@@ -31,13 +31,13 @@ values come from `pubspec.yaml` and are used for all platform builds. See
 
 - Review a source folder in single-image or grid view, with sorting and date
   grouping.
-- Pair same-named JPEG and Canon CR3 files for review, and use an embedded CR3
-  preview when a matching JPEG is unavailable.
+- Pair same-named JPEG and RAW files (CR3, NEF, ARW, DNG and others) for review,
+  and use an embedded RAW preview when a matching JPEG is unavailable.
 - Detect exact duplicates in the destination library using SHA-256 hashes.
-- Choose which files to import, including whether to keep JPEG, CR3, or both
+- Choose which files to import, including whether to keep the JPEG, the RAW, or both
   for a paired shot.
 - Organize imported files with configurable destination templates, optionally
-  keeping JPEG and CR3 files in separate folder trees.
+  keeping JPEG and RAW files in separate folder trees.
 - Browse media already in the library.
 - Run ingest and browsing without a cloud account or hosted backend.
 
@@ -49,12 +49,13 @@ Kinesis scans these filename extensions (case-insensitively):
 | --- | --- |
 | JPEG | `.jpg`, `.jpeg` |
 | Canon RAW | `.cr3` |
-| Other images | `.png`, `.heic`, `.gif` |
+| Other images | `.png`, `.heic`, `.heif`, `.gif`, `.webp`, `.avif`, `.bmp`, `.tif`, `.tiff` |
+| Other RAW (paired like CR3) | `.dng`, `.cr2`, `.nef`, `.nrw`, `.arw`, `.srf`, `.sr2`, `.raf`, `.orf`, `.rw2`, `.pef`, `.srw`, `.3fr`, `.iiq`, `.erf`, `.kdc`, `.mrw`, `.x3f` |
 | Video | `.mp4`, `.mov` |
 
-JPEG and CR3 files with the same name in the same folder are treated as a
+JPEG and RAW files with the same name in the same folder are treated as a
 paired shot. Kinesis displays image previews where the desktop image decoder
-supports them and can extract a preview JPEG embedded in a CR3. Video files
+supports them and can extract a preview JPEG embedded in a RAW. Video files
 can be imported and listed, but video playback is not currently provided.
 
 ## Install and run
@@ -102,7 +103,10 @@ flutter build linux  # Linux
 ## Using Kinesis
 
 1. Connect a camera card or other source drive, or choose a local source
-   folder. Kinesis scans it recursively. On Android, choose the folder in the
+   folder. Kinesis scans it recursively. On desktop, mounted volumes with a
+   `DCIM` folder at their root appear as quick picks next to the folder picker;
+   they are looked up when the screen opens and with the refresh button, not
+   in the background. On Android, choose the folder in the
    system folder picker; Kinesis uses the granted Storage Access Framework
    access instead of raw `/storage/...` paths.
 2. Choose a destination library folder with **Set library**. The library can
@@ -127,7 +131,7 @@ and double-click a tile to open it in single-image view.
 Kinesis compares file contents using SHA-256, not just names. A matching file
 already in the library is not copied a second time. Items containing a
 duplicate default to **Delete both**; review that decision before confirming.
-If only one half of a JPEG/CR3 pair is already in the library, you can change
+If only one half of a JPEG/RAW pair is already in the library, you can change
 the decision to import the missing half.
 
 ## Destination templates
@@ -143,19 +147,43 @@ Templates accept these tokens:
 
 | Token | Value |
 | --- | --- |
-| `{year}` | Four-digit year from the source file's last-modified timestamp |
-| `{month}` | Two-digit month from the same timestamp |
-| `{day}` | Two-digit day from the same timestamp |
+| `{year}` | Four-digit year of the capture date |
+| `{month}` | Two-digit month of the capture date |
+| `{day}` | Two-digit day of the capture date |
 | `{originalName}` | Original filename, including its extension |
 | `{sourceFolder}` | Name of the folder containing the source file |
+| `{shoot}` | Shoot name from **Import options** for this import; omitted when empty |
+| `{camera}` | Camera make and model from EXIF or CR3 metadata (EXIF for other RAW formats), or `Unknown camera` |
+| `{ext}` | Lower-case file extension without the dot, such as `cr3` |
 
-For example, with the default template and a source file last modified on
-October 17, 2026, Kinesis imports it into `2026/2026-10-17/`. The folder date
-uses the file's last-modified timestamp; it is not necessarily the photo's
-EXIF capture date.
+`{shoot}` and `{camera}` are made safe for use as folder names: path separators
+and characters like `: * ? " < > |` become `-`, and leading or trailing dots,
+dashes and spaces are removed, so a name can't add folders or climb out of the
+library. When no shoot name is set, `{shoot}` disappears together with the
+separators (space, `-`, `_`, `.`, `,`) right after it, a folder left empty is
+dropped, and separators left dangling at the end of a folder name are trimmed:
+`{year}/{shoot} - {day}` becomes `2026/17`, not `2026/ - 17`.
+
+The capture date is the first of these that is available: the EXIF
+`DateTimeOriginal` (JPEG and other images), the capture date stored in a RAW's
+metadata, a date in the file name (`IMG_20261017_143000`, `VID_…`, `DSC_…`,
+`2026-10-17_14-30-00` or `2026-10-17-143000`), and finally the file's
+last-modified time. A JPEG/RAW pair uses one date, so both files land in the
+same folder. For example, with the default template, a photo taken on
+October 17, 2026 is imported into `2026/2026-10-17/`. Video dates come from the
+file name or last-modified time; the MP4/MOV creation time is not read because
+cameras disagree on whether it is UTC or local time. After a verified copy,
+Kinesis sets the copy's last-modified time to the capture date (not on
+Android); source files are never modified.
+
+Open **Import options** in the review screen to name the shoot and, if the
+camera clock or time zone was wrong, to set one fixed date and time for the
+whole import or to shift every capture date by hours and minutes. The review labels, date groups, folders and
+modified times of the copies use the adjusted dates, and the confirm dialog
+says so. The setting applies to one import and is not saved.
 
 Enable **Use separate JPEG and CRAW folders** to configure distinct templates
-for JPEG and CR3 files. Their defaults are `JPEG/{year}/{year}-{month}-{day}`
+for JPEG and RAW files (the RAW button and folder keep their CR3/CRAW names). Their defaults are `JPEG/{year}/{year}-{month}-{day}`
 and `CRAW/{year}/{year}-{month}-{day}`. Other supported media types continue
 to use the general destination template. Templates must resolve to a location
 inside the selected library.
@@ -168,10 +196,16 @@ its destination folder. It does not delete a source file immediately after
 copying it: source cleanup happens after the selected new files have been
 copied and verified.
 
+While importing, Kinesis shows files done out of total, bytes done out of
+total and the current file. When you confirm the plan it first compares the
+bytes to copy with the free space on the library volume and stops with a
+message if there isn't enough. Free space is read with `df` on macOS and Linux;
+on Android and Windows it can't be read, so the check is skipped.
+
 **Confirming the plan can move source files to Trash.** For an item with a
-JPEG/CR3 pair, the decision determines what is imported, but all source files
+JPEG/RAW pair, the decision determines what is imported, but all source files
 in that pair are included in cleanup. For example, **Keep JPEG** imports the
-JPEG and moves both the JPEG and CR3 source files to Trash. Duplicate source
+JPEG and moves both the JPEG and RAW source files to Trash. Duplicate source
 files are also included in cleanup by the default duplicate decision. Check
 the plan before confirming, and keep another backup of important media.
 
@@ -185,10 +219,15 @@ not permanent deletion; you can inspect that folder and restore files manually.
 
 Kinesis stores settings and its app-level record of imported assets in the
 operating system's application-support directory. It also maintains a
-`.kinesis/index.json` hash index in the library to speed up duplicate checks;
-this index is rebuildable from the media files. Android currently calculates
-library hashes through the selected folder grant rather than creating that
-index. Media remains in the folders you choose—Kinesis does not require a
+`.kinesis/index.json` index in the library that lists every media file with its
+size and modified time. A file's SHA-256 is only calculated when it has the
+same size as a file on the source, then stored in the index, so an ingest never
+reads the whole library. Files whose path, size and modified time still match
+reuse their stored hash. The index is a rebuildable cache: if it is missing,
+damaged or from an unknown version, Kinesis rebuilds it. Duplicates are always
+decided by full-content SHA-256. On Android, library hashes are calculated
+through the selected folder grant and kept in memory rather than in an index
+file. Media remains in the folders you choose—Kinesis does not require a
 separate cloud service or proprietary library database.
 
 ## Development
@@ -203,3 +242,7 @@ flutter test
 
 See [Flutter's documentation](https://docs.flutter.dev/) for framework and
 desktop development guidance.
+
+---
+
+Built by [Max Sloof](https://maxsloof.nl).

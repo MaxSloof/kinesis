@@ -11,10 +11,12 @@ import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'domain/import_options.dart';
+import 'domain/ingest_progress.dart';
 import 'domain/media.dart';
 import 'domain/selection.dart';
 import 'domain/view_options.dart';
 import 'services/cr3_preview.dart';
+import 'services/free_space.dart';
 import 'services/media_service.dart';
 import 'services/saf_storage.dart';
 import 'shortcuts.dart';
@@ -689,27 +691,59 @@ class _KinesisHomeState extends State<KinesisHome> {
       ),
     );
     if (approved != true || !mounted) return;
+    final space = await checkFreeSpace(
+      library: _library!,
+      requiredBytes: totalBytes(plan.toImport),
+    );
+    if (!mounted) return;
+    if (!space.isEnough) {
+      await showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Not enough space'),
+          content: Text(
+            '${space.message} Free up space or choose another library, then '
+            'try again. Nothing was copied.',
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
     _ingesting = true;
     final knownHashes = <String>{..._existingHashes};
     final importedAssets = <ImportedAsset>[];
     var skipped = 0;
     final sourcesToTrash = _trashSources ? plan.toDelete : const <MediaFile>[];
     final totalSteps = plan.toImport.length + sourcesToTrash.length;
+    final bytesTotal = totalBytes(plan.toImport);
+    var bytesDone = 0;
     final progress = ValueNotifier(
-      _IngestProgress(
-        phase: 'Copying and verifying',
+      IngestProgress(
+        phase: IngestProgress.copyPhase,
         done: 0,
         total: totalSteps,
+        copyTotal: plan.toImport.length,
+        bytesTotal: bytesTotal,
       ),
     );
     var stepsDone = 0;
-    void step(String phase, String? file) {
+    void step(String phase, MediaFile file) {
       stepsDone++;
-      progress.value = _IngestProgress(
+      if (phase == IngestProgress.copyPhase) bytesDone += file.sizeBytes ?? 0;
+      progress.value = IngestProgress(
         phase: phase,
         done: stepsDone,
         total: totalSteps,
-        currentFile: file,
+        copyTotal: plan.toImport.length,
+        bytesDone: bytesDone,
+        bytesTotal: bytesTotal,
+        currentFile: file.name,
       );
     }
 
@@ -733,16 +767,19 @@ class _KinesisHomeState extends State<KinesisHome> {
     );
     try {
       for (final file in plan.toImport) {
-        progress.value = _IngestProgress(
-          phase: 'Copying and verifying',
+        progress.value = IngestProgress(
+          phase: IngestProgress.copyPhase,
           done: stepsDone,
           total: totalSteps,
+          copyTotal: plan.toImport.length,
+          bytesDone: bytesDone,
+          bytesTotal: bytesTotal,
           currentFile: file.name,
         );
         final sourceHash = await _media.hashFile(file.path);
         if (!knownHashes.add(sourceHash)) {
           skipped++;
-          step('Copying and verifying', file.name);
+          step(IngestProgress.copyPhase, file);
           continue;
         }
         importedAssets.add(
@@ -756,12 +793,15 @@ class _KinesisHomeState extends State<KinesisHome> {
             cameraModel: camerasByPath[file.path],
           ),
         );
-        step('Copying and verifying', file.name);
+        step(IngestProgress.copyPhase, file);
       }
-      progress.value = _IngestProgress(
+      progress.value = IngestProgress(
         phase: 'Updating library index',
         done: stepsDone,
         total: totalSteps,
+        copyTotal: plan.toImport.length,
+        bytesDone: bytesDone,
+        bytesTotal: bytesTotal,
       );
       _existingHashes.addAll(importedAssets.map((asset) => asset.hash));
       _libraryAssets.addAll(importedAssets);
@@ -773,14 +813,17 @@ class _KinesisHomeState extends State<KinesisHome> {
       );
       await _saveSettings();
       for (final file in sourcesToTrash) {
-        progress.value = _IngestProgress(
+        progress.value = IngestProgress(
           phase: 'Moving sources to Trash',
           done: stepsDone,
           total: totalSteps,
+          copyTotal: plan.toImport.length,
+          bytesDone: bytesDone,
+          bytesTotal: bytesTotal,
           currentFile: file.name,
         );
         await _trash.moveToTrash(file);
-        step('Moving sources to Trash', file.name);
+        step('Moving sources to Trash', file);
       }
       _closeProgress(dialogClosed);
       if (mounted) {
@@ -916,7 +959,7 @@ class _KinesisHomeState extends State<KinesisHome> {
 
   bool _progressOpen = false;
   bool _ingestMinimized = false;
-  ValueNotifier<_IngestProgress>? _ingestProgress;
+  ValueNotifier<IngestProgress>? _ingestProgress;
 
   Widget? _minimizedIngestBar() {
     final progress = _ingestProgress;
@@ -925,7 +968,7 @@ class _KinesisHomeState extends State<KinesisHome> {
       elevation: 8,
       child: SafeArea(
         top: false,
-        child: ValueListenableBuilder<_IngestProgress>(
+        child: ValueListenableBuilder<IngestProgress>(
           valueListenable: progress,
           builder: (context, value, _) => Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -942,7 +985,8 @@ class _KinesisHomeState extends State<KinesisHome> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: Text(
-                    '${value.phase}  ·  ${value.done} / ${value.total}',
+                    '${value.phase}  ·  ${value.filesLabel}'
+                    '${value.bytesLabel == null ? '' : '  ·  ${value.bytesLabel}'}',
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
@@ -2851,29 +2895,13 @@ Widget _formatBadges(ReviewItem item) {
   );
 }
 
-class _IngestProgress {
-  const _IngestProgress({
-    required this.phase,
-    required this.done,
-    required this.total,
-    this.currentFile,
-  });
-
-  final String phase;
-  final int done;
-  final int total;
-  final String? currentFile;
-
-  double? get fraction => total == 0 ? null : done / total;
-}
-
 class _IngestProgressDialog extends StatelessWidget {
   const _IngestProgressDialog({
     required this.progress,
     required this.onMinimize,
   });
 
-  final ValueListenable<_IngestProgress> progress;
+  final ValueListenable<IngestProgress> progress;
   final VoidCallback onMinimize;
 
   @override
@@ -2882,7 +2910,7 @@ class _IngestProgressDialog extends StatelessWidget {
     actions: [TextButton(onPressed: onMinimize, child: const Text('Minimize'))],
     content: SizedBox(
       width: 380,
-      child: ValueListenableBuilder<_IngestProgress>(
+      child: ValueListenableBuilder<IngestProgress>(
         valueListenable: progress,
         builder: (context, value, _) {
           final theme = Theme.of(context);
@@ -2915,12 +2943,16 @@ class _IngestProgressDialog extends StatelessWidget {
                   ),
                   const SizedBox(width: 12),
                   Text(
-                    '${value.done} / ${value.total}'
+                    '${value.filesLabel}'
                     '${fraction == null ? '' : '  ·  ${(fraction * 100).round()}%'}',
                     style: theme.textTheme.bodySmall,
                   ),
                 ],
               ),
+              if (value.bytesLabel != null) ...[
+                const SizedBox(height: 4),
+                Text(value.bytesLabel!, style: theme.textTheme.bodySmall),
+              ],
             ],
           );
         },

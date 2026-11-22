@@ -195,6 +195,12 @@ its destination folder. It does not delete a source file immediately after
 copying it: source cleanup happens after the selected new files have been
 copied and verified.
 
+While importing, Kinesis shows files done out of total, bytes done out of
+total and the current file. When you confirm the plan it first compares the
+bytes to copy with the free space on the library volume and stops with a
+message if there isn't enough. Free space is read with `df` on macOS and Linux;
+on Android and Windows it can't be read, so the check is skipped.
+
 **Confirming the plan can move source files to Trash.** For an item with a
 JPEG/CR3 pair, the decision determines what is imported, but all source files
 in that pair are included in cleanup. For example, **Keep JPEG** imports the

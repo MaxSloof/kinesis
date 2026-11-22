@@ -151,6 +151,17 @@ Templates accept these tokens:
 | `{day}` | Two-digit day of the capture date |
 | `{originalName}` | Original filename, including its extension |
 | `{sourceFolder}` | Name of the folder containing the source file |
+| `{shoot}` | Shoot name from **Import options** for this import; omitted when empty |
+| `{camera}` | Camera make and model from EXIF or CR3 metadata, or `Unknown camera` |
+| `{ext}` | Lower-case file extension without the dot, such as `cr3` |
+
+`{shoot}` and `{camera}` are made safe for use as folder names: path separators
+and characters like `: * ? " < > |` become `-`, and leading or trailing dots,
+dashes and spaces are removed, so a name can't add folders or climb out of the
+library. When no shoot name is set, `{shoot}` disappears together with the
+separators (space, `-`, `_`, `.`, `,`) right after it, a folder left empty is
+dropped, and separators left dangling at the end of a folder name are trimmed:
+`{year}/{shoot} - {day}` becomes `2026/17`, not `2026/ - 17`.
 
 The capture date is the first of these that is available: the EXIF
 `DateTimeOriginal` (JPEG and other images), the capture date stored in a CR3's
@@ -164,9 +175,9 @@ cameras disagree on whether it is UTC or local time. After a verified copy,
 Kinesis sets the copy's last-modified time to the capture date (not on
 Android); source files are never modified.
 
-If the camera clock or time zone was wrong, use **Adjust dates** in the review
-screen to set one fixed date and time for the whole import or to shift every
-capture date by hours and minutes. The review labels, date groups, folders and
+Open **Import options** in the review screen to name the shoot and, if the
+camera clock or time zone was wrong, to set one fixed date and time for the
+whole import or to shift every capture date by hours and minutes. The review labels, date groups, folders and
 modified times of the copies use the adjusted dates, and the confirm dialog
 says so. The setting applies to one import and is not saved.
 

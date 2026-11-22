@@ -12,9 +12,14 @@ const _canonUuid = [
 
 const _maxMoovBytes = 4 * 1024 * 1024;
 
-/// Capture date from the CR3 at [filePath], reading only the `moov` box.
-/// Runs in a worker isolate, so it uses synchronous reads.
-DateTime? readCr3CaptureDate(String filePath) {
+/// What Kinesis reads from a CR3: capture date and camera make and model.
+typedef Cr3Metadata = ({DateTime? captureDate, String? make, String? model});
+
+const _noMetadata = (captureDate: null, make: null, model: null);
+
+/// Metadata of the CR3 at [filePath], reading only the `moov` box. Runs in a
+/// worker isolate, so it uses synchronous reads.
+Cr3Metadata readCr3Metadata(String filePath) {
   final file = File(filePath).openSync();
   try {
     final length = file.lengthSync();
@@ -23,36 +28,36 @@ DateTime? readCr3CaptureDate(String filePath) {
       file.setPositionSync(offset);
       final header = file.readSync(16);
       final box = _readBoxHeader(header, 0, length - offset);
-      if (box == null) return null;
+      if (box == null) return _noMetadata;
       if (box.type == 'moov') {
         final payload = box.end - box.payloadStart;
-        if (payload > _maxMoovBytes) return null;
+        if (payload > _maxMoovBytes) return _noMetadata;
         file.setPositionSync(offset + box.payloadStart);
-        return cr3CaptureDateFromMoov(file.readSync(payload));
+        return cr3MetadataFromMoov(file.readSync(payload));
       }
       offset += box.end;
     }
   } finally {
     file.closeSync();
   }
-  return null;
+  return _noMetadata;
 }
 
-/// Capture date from the first bytes of a CR3, for sources that can't seek
-/// (SAF). Needs `moov` to lie completely inside [head].
-DateTime? cr3CaptureDateFromHead(Uint8List head) {
+/// Metadata from the first bytes of a CR3, for sources that can't seek (SAF).
+/// Needs `moov` to lie completely inside [head].
+Cr3Metadata cr3MetadataFromHead(Uint8List head) {
   for (final box in _boxes(head, 0, head.length)) {
     if (box.type == 'moov') {
-      return cr3CaptureDateFromMoov(
+      return cr3MetadataFromMoov(
         Uint8List.sublistView(head, box.payloadStart, box.end),
       );
     }
   }
-  return null;
+  return _noMetadata;
 }
 
-/// Capture date from the payload of a CR3 `moov` box.
-DateTime? cr3CaptureDateFromMoov(Uint8List moov) {
+/// Metadata from the payload of a CR3 `moov` box.
+Cr3Metadata cr3MetadataFromMoov(Uint8List moov) {
   for (final box in _boxes(moov, 0, moov.length)) {
     if (box.type != 'uuid' ||
         box.end - box.payloadStart < 16 ||
@@ -70,15 +75,22 @@ DateTime? cr3CaptureDateFromMoov(Uint8List moov) {
       if (child.type == 'CMT1') ifd0 = payload;
       if (child.type == 'CMT2') exif = payload;
     }
+    DateTime? captureDate;
     for (final tag in const [0x9003, 0x9004]) {
       final value = exif == null ? null : _tiffAscii(exif, tag);
-      final date = value == null ? null : parseExifDate(value);
-      if (date != null) return date;
+      captureDate ??= value == null ? null : parseExifDate(value);
     }
-    final value = ifd0 == null ? null : _tiffAscii(ifd0, 0x0132);
-    return value == null ? null : parseExifDate(value);
+    if (captureDate == null && ifd0 != null) {
+      final value = _tiffAscii(ifd0, 0x0132);
+      captureDate = value == null ? null : parseExifDate(value);
+    }
+    return (
+      captureDate: captureDate,
+      make: ifd0 == null ? null : _tiffAscii(ifd0, 0x010f),
+      model: ifd0 == null ? null : _tiffAscii(ifd0, 0x0110),
+    );
   }
-  return null;
+  return _noMetadata;
 }
 
 class _Box {

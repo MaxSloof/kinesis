@@ -10,6 +10,7 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as path;
 
 import '../domain/capture_date.dart';
+import '../domain/destination_template.dart';
 import '../domain/media.dart';
 import 'cr3_metadata.dart';
 import 'saf_storage.dart';
@@ -41,29 +42,39 @@ class MediaService {
     '.mov': MediaKind.video,
   };
 
-  Future<DateTime?> _readCaptureDate(String filePath, MediaKind kind) async {
-    if (kind == MediaKind.video) return null;
+  /// Capture date and camera, read together so a file is opened once.
+  Future<({DateTime? captureDate, String? camera})> _readMetadata(
+    String filePath,
+    MediaKind kind,
+  ) async {
+    const none = (captureDate: null, camera: null);
+    if (kind == MediaKind.video) return none;
     try {
       final isSaf = SafStorage.isUri(filePath);
       if (kind == MediaKind.cr3) {
-        return isSaf
-            ? cr3CaptureDateFromHead(
+        final cr3 = isSaf
+            ? cr3MetadataFromHead(
                 await SafStorage.instance.readHead(filePath, 1024 * 1024),
               )
-            : await Isolate.run(() => readCr3CaptureDate(filePath));
+            : await Isolate.run(() => readCr3Metadata(filePath));
+        return (
+          captureDate: cr3.captureDate,
+          camera: cameraName(cr3.make, cr3.model),
+        );
       }
-      final value = isSaf
-          ? await _readSafExifDateString(filePath)
+      final exif = isSaf
+          ? await _readSafExifStrings(filePath)
           : await Isolate.run(
-              () => _readExifDateString(filePath, kind == MediaKind.jpeg),
+              () => _readExifStrings(filePath, kind == MediaKind.jpeg),
             );
-      return value == null ? null : parseExifDate(value);
-    } on Object catch (error) {
-      debugPrint(
-        '[metadata] could not read capture date for $filePath: $error',
+      return (
+        captureDate: exif.date == null ? null : parseExifDate(exif.date!),
+        camera: cameraName(exif.make, exif.model),
       );
+    } on Object catch (error) {
+      debugPrint('[metadata] could not read metadata for $filePath: $error');
     }
-    return null;
+    return none;
   }
 
   Future<List<ReviewItem>> scan(
@@ -79,6 +90,7 @@ class MediaService {
         if (entry.relativePath.split('/').contains('.kinesis-trash')) continue;
         final kind = _extensions[path.extension(document.name).toLowerCase()];
         if (kind == null) continue;
+        final metadata = await _readMetadata(document.uri, kind);
         final file = MediaFile(
           path: document.uri,
           kind: kind,
@@ -88,7 +100,8 @@ class MediaService {
           rootName: sourceRootName,
           sizeBytes: document.length,
           modified: DateTime.fromMillisecondsSinceEpoch(document.lastModified),
-          captureDate: await _readCaptureDate(document.uri, kind),
+          captureDate: metadata.captureDate,
+          cameraModel: metadata.camera,
         );
         files.add(
           existingHashes.isEmpty
@@ -110,12 +123,14 @@ class MediaService {
         final kind = _extensions[path.extension(entity.path).toLowerCase()];
         if (kind != null) {
           final stat = await entity.stat();
+          final metadata = await _readMetadata(entity.path, kind);
           final file = MediaFile(
             path: entity.path,
             kind: kind,
             sizeBytes: stat.size,
             modified: stat.modified,
-            captureDate: await _readCaptureDate(entity.path, kind),
+            captureDate: metadata.captureDate,
+            cameraModel: metadata.camera,
           );
           files.add(
             existingHashes.isEmpty
@@ -607,6 +622,7 @@ class MediaService {
         final i = next++;
         final file = files[i];
         final kind = _extensions[path.extension(file.path).toLowerCase()]!;
+        final metadata = await _readMetadata(file.absolutePath, kind);
         result[i] = MediaFile(
           path: file.absolutePath,
           kind: kind,
@@ -617,7 +633,8 @@ class MediaService {
           modified: DateTime.fromMillisecondsSinceEpoch(
             file.modifiedMilliseconds,
           ),
-          captureDate: await _readCaptureDate(file.absolutePath, kind),
+          captureDate: metadata.captureDate,
+          cameraModel: metadata.camera,
         );
       }
     }
@@ -729,6 +746,8 @@ class MediaService {
     String template, {
     DateTime? captureDate,
     CaptureDateAdjustment adjustment = CaptureDateAdjustment.none,
+    String shoot = '',
+    String? cameraModel,
   }) async {
     if (SafStorage.isUri(library)) {
       return _copyAndVerifySaf(
@@ -737,14 +756,18 @@ class MediaService {
         template,
         captureDate,
         adjustment,
+        shoot,
+        cameraModel,
       );
     }
     final date = await _destinationDate(source, captureDate, adjustment);
-    final directory = expandTemplate(
+    final directory = expandDestinationTemplate(
       template,
       date,
       source.name,
       _sourceFolder(source),
+      shoot: shoot,
+      camera: cameraModel ?? source.cameraModel,
     );
     final libraryRoot = path.normalize(path.absolute(library));
     final destinationPath = path.normalize(
@@ -806,13 +829,17 @@ class MediaService {
     String template,
     DateTime? captureDate,
     CaptureDateAdjustment adjustment,
+    String shoot,
+    String? cameraModel,
   ) async {
     final date = await _destinationDate(source, captureDate, adjustment);
-    final directory = expandTemplate(
+    final directory = expandDestinationTemplate(
       template,
       date,
       source.name,
       _sourceFolder(source),
+      shoot: shoot,
+      camera: cameraModel ?? source.cameraModel,
     );
     final segments = path.posix
         .split(directory)
@@ -880,23 +907,13 @@ class MediaService {
         '.mov' => 'video/quicktime',
         _ => 'application/octet-stream',
       };
-
-  String expandTemplate(
-    String template,
-    DateTime date,
-    String name,
-    String sourceFolder,
-  ) => template
-      .replaceAll('{year}', date.year.toString())
-      .replaceAll('{month}', date.month.toString().padLeft(2, '0'))
-      .replaceAll('{day}', date.day.toString().padLeft(2, '0'))
-      .replaceAll('{originalName}', name)
-      .replaceAll('{sourceFolder}', sourceFolder);
 }
+
+typedef _ExifStrings = ({String? date, String? make, String? model});
 
 /// Runs in a worker isolate. JPEG EXIF lives in the first few dozen KB, so only
 /// the head of the file is read instead of the whole image.
-Future<String?> _readExifDateString(String filePath, bool headOnly) async {
+Future<_ExifStrings> _readExifStrings(String filePath, bool headOnly) async {
   final Map<String, IfdTag> tags;
   if (headOnly) {
     final raf = await File(filePath).open();
@@ -909,30 +926,23 @@ Future<String?> _readExifDateString(String filePath, bool headOnly) async {
   } else {
     tags = await readExifFromFile(File(filePath));
   }
-  for (final name in const [
-    'EXIF DateTimeOriginal',
-    'EXIF DateTimeDigitized',
-    'Image DateTime',
-  ]) {
-    final value = tags[name]?.printable;
-    if (value != null) return value;
-  }
-  return null;
+  return _exifStrings(tags);
 }
 
-Future<String?> _readSafExifDateString(String uri) async {
+Future<_ExifStrings> _readSafExifStrings(String uri) async {
   final bytes = await SafStorage.instance.readHead(uri, 256 * 1024);
-  final tags = await readExifFromBytes(bytes);
-  for (final name in const [
+  return _exifStrings(await readExifFromBytes(bytes));
+}
+
+_ExifStrings _exifStrings(Map<String, IfdTag> tags) => (
+  date: const [
     'EXIF DateTimeOriginal',
     'EXIF DateTimeDigitized',
     'Image DateTime',
-  ]) {
-    final value = tags[name]?.printable;
-    if (value != null) return value;
-  }
-  return null;
-}
+  ].map((name) => tags[name]?.printable).nonNulls.firstOrNull,
+  make: tags['Image Make']?.printable,
+  model: tags['Image Model']?.printable,
+);
 
 class _LibraryFile {
   const _LibraryFile({

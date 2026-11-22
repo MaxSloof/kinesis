@@ -26,6 +26,7 @@ class MediaFile {
     this.alreadyExists = false,
     this.sizeBytes,
     this.captureDate,
+    this.cameraModel,
   });
 
   final String path;
@@ -39,6 +40,9 @@ class MediaFile {
   final bool alreadyExists;
   final int? sizeBytes;
   final DateTime? captureDate;
+
+  /// Camera make and model from the file's metadata, when it has any.
+  final String? cameraModel;
 
   String get name => displayName ?? File(path).uri.pathSegments.last;
 
@@ -67,6 +71,7 @@ class MediaFile {
     alreadyExists: alreadyExists,
     sizeBytes: sizeBytes,
     captureDate: captureDate,
+    cameraModel: cameraModel,
   );
 
   MediaFile withExistingStatus(bool value) => MediaFile(
@@ -81,6 +86,7 @@ class MediaFile {
     alreadyExists: value,
     sizeBytes: sizeBytes,
     captureDate: captureDate,
+    cameraModel: cameraModel,
   );
 }
 
@@ -130,6 +136,9 @@ class ReviewItem {
   ].where((format) => format.isNotEmpty).toList();
 
   DateTime? get captureDate => resolvedCaptureDate();
+
+  String? get cameraModel =>
+      [jpeg, cr3, single].map((file) => file?.cameraModel).nonNulls.firstOrNull;
 
   /// One date for every file of the item, so a JPEG and its CR3 land in the
   /// same folder.

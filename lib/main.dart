@@ -10,7 +10,7 @@ import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import 'domain/capture_date.dart';
+import 'domain/import_options.dart';
 import 'domain/media.dart';
 import 'domain/selection.dart';
 import 'domain/view_options.dart';
@@ -112,7 +112,7 @@ class _KinesisHomeState extends State<KinesisHome> {
   bool _ingesting = false;
 
   /// Applies to the current import only; never saved.
-  CaptureDateAdjustment _dateAdjustment = CaptureDateAdjustment.none;
+  ImportOptions _importOptions = ImportOptions.none;
   final _selection = MediaSelection();
 
   @override
@@ -318,7 +318,7 @@ class _KinesisHomeState extends State<KinesisHome> {
   }
 
   Future<void> _openSource(String selected) async {
-    _dateAdjustment = CaptureDateAdjustment.none;
+    _importOptions = ImportOptions.none;
     final previousSource = _source;
     _source = selected;
     _sourceRefreshTimer?.cancel();
@@ -604,11 +604,19 @@ class _KinesisHomeState extends State<KinesisHome> {
           ..._items[index].files.where((file) => file.alreadyExists),
     ];
     // A JPEG and its CR3 are filed under one date.
+    final camerasByPath = <String, String?>{
+      for (final index in _decisions.keys)
+        if (index < _items.length)
+          for (final file in _items[index].files)
+            file.path: _items[index].cameraModel,
+    };
     final datesByPath = <String, DateTime?>{
       for (final index in _decisions.keys)
         if (index < _items.length)
           for (final file in _items[index].files)
-            file.path: _items[index].resolvedCaptureDate(_dateAdjustment),
+            file.path: _items[index].resolvedCaptureDate(
+              _importOptions.dateAdjustment,
+            ),
     };
     final duplicateFiles = alreadyInLibraryFiles.length;
     final libraryJpegReferences = _decisions.keys
@@ -634,11 +642,18 @@ class _KinesisHomeState extends State<KinesisHome> {
                 ),
                 const SizedBox(height: 16),
                 _ingestPlanTable(plan, alreadyInLibraryFiles, unchangedFiles),
-                if (_dateAdjustment.description != null) ...[
+                if (_importOptions.isActive) ...[
                   const SizedBox(height: 16),
                   Text(
-                    '${_dateAdjustment.description}. Imported files are '
-                    'filed and dated accordingly; source files are not changed.',
+                    [
+                      ?_importOptions.dateAdjustment.description,
+                      if (_importOptions.shoot.trim().isNotEmpty)
+                        'Shoot name: ${_importOptions.shoot.trim()}',
+                    ].join('. '),
+                  ),
+                  const Text(
+                    'Imported files are filed and dated accordingly; source '
+                    'files are not changed.',
                   ),
                 ],
                 if (libraryJpegReferences > 0) ...[
@@ -736,6 +751,9 @@ class _KinesisHomeState extends State<KinesisHome> {
             _library!,
             _templateFor(file),
             captureDate: datesByPath[file.path],
+            adjustment: _importOptions.dateAdjustment,
+            shoot: _importOptions.shoot,
+            cameraModel: camerasByPath[file.path],
           ),
         );
         step('Copying and verifying', file.name);
@@ -766,7 +784,7 @@ class _KinesisHomeState extends State<KinesisHome> {
       }
       _closeProgress(dialogClosed);
       if (mounted) {
-        setState(() => _dateAdjustment = CaptureDateAdjustment.none);
+        setState(() => _importOptions = ImportOptions.none);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
@@ -1137,13 +1155,13 @@ class _KinesisHomeState extends State<KinesisHome> {
                   ),
                   if (_items.isNotEmpty) ...[
                     IconButton(
-                      onPressed: _showDateAdjustment,
+                      onPressed: _showImportOptions,
                       icon: Badge(
-                        isLabelVisible: _dateAdjustment.isActive,
+                        isLabelVisible: _importOptions.isActive,
                         smallSize: 8,
-                        child: const Icon(Icons.schedule_outlined),
+                        child: const Icon(Icons.tune_outlined),
                       ),
-                      tooltip: _dateAdjustment.description ?? 'Adjust dates',
+                      tooltip: 'Import options',
                     ),
                     IconButton(
                       onPressed: () => setState(() {
@@ -1252,8 +1270,8 @@ class _KinesisHomeState extends State<KinesisHome> {
         switch (action) {
           case 'settings':
             _showSettings();
-          case 'dates':
-            _showDateAdjustment();
+          case 'importOptions':
+            _showImportOptions();
           case 'library':
             _showLibrary();
           case 'chooseLibrary':
@@ -1282,9 +1300,11 @@ class _KinesisHomeState extends State<KinesisHome> {
         const PopupMenuItem(value: 'settings', child: Text('Settings')),
         if (_items.isNotEmpty) ...[
           PopupMenuItem(
-            value: 'dates',
+            value: 'importOptions',
             child: Text(
-              _dateAdjustment.isActive ? 'Dates (adjusted)…' : 'Adjust dates…',
+              _importOptions.isActive
+                  ? 'Import options (set)…'
+                  : 'Import options…',
             ),
           ),
           PopupMenuItem(
@@ -1478,7 +1498,7 @@ class _KinesisHomeState extends State<KinesisHome> {
             ),
           const SizedBox(height: 4),
           Text(
-            '${MediaViewOrder.captureDateLabel(item.resolvedCaptureDate(_dateAdjustment))}  ·  '
+            '${MediaViewOrder.captureDateLabel(item.resolvedCaptureDate(_importOptions.dateAdjustment))}  ·  '
             '${MediaViewOrder.sizeLabel(item.sizeBytes)}',
             style: Theme.of(context).textTheme.bodySmall,
           ),
@@ -1544,7 +1564,8 @@ class _KinesisHomeState extends State<KinesisHome> {
   List<MediaDateGroup<int>> _gridGroups() => _groupByDate
       ? MediaViewOrder.groupByCaptureDate<int>(
           _displayOrder,
-          (index) => _items[index].resolvedCaptureDate(_dateAdjustment),
+          (index) =>
+              _items[index].resolvedCaptureDate(_importOptions.dateAdjustment),
           newestFirst: _sortOrder != MediaSortOrder.captureOldest,
         )
       : [MediaDateGroup(label: '', items: _displayOrder)];
@@ -1857,7 +1878,9 @@ class _KinesisHomeState extends State<KinesisHome> {
     final groups = _groupByDate
         ? MediaViewOrder.groupByCaptureDate<int>(
             visibleOrder,
-            (index) => _items[index].resolvedCaptureDate(_dateAdjustment),
+            (index) => _items[index].resolvedCaptureDate(
+              _importOptions.dateAdjustment,
+            ),
             newestFirst: _sortOrder != MediaSortOrder.captureOldest,
           )
         : [MediaDateGroup(label: '', items: visibleOrder)];
@@ -2188,13 +2211,13 @@ class _KinesisHomeState extends State<KinesisHome> {
         child: Text('$key  $label'),
       );
 
-  Future<void> _showDateAdjustment() async {
-    final adjustment = await showDialog<CaptureDateAdjustment>(
+  Future<void> _showImportOptions() async {
+    final options = await showDialog<ImportOptions>(
       context: context,
-      builder: (context) => ImportOptionsDialog(initial: _dateAdjustment),
+      builder: (context) => ImportOptionsDialog(initial: _importOptions),
     );
-    if (adjustment == null || !mounted) return;
-    setState(() => _dateAdjustment = adjustment);
+    if (options == null || !mounted) return;
+    setState(() => _importOptions = options);
   }
 
   Future<void> _showSettings() async {
@@ -2248,7 +2271,8 @@ class _KinesisHomeState extends State<KinesisHome> {
                   decoration: const InputDecoration(
                     labelText: 'Destination template',
                     helperText:
-                        'Tokens: {year}, {month}, {day}, {originalName}, {sourceFolder}',
+                        'Tokens: {year}, {month}, {day}, {originalName}, {sourceFolder}, '
+                        '{shoot}, {camera}, {ext}',
                   ),
                 ),
                 StatefulBuilder(

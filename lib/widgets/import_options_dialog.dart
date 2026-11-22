@@ -2,15 +2,17 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../domain/capture_date.dart';
+import '../domain/import_options.dart';
 
 enum _DateMode { none, fixed, shift }
 
-/// Lets the user override every capture date or shift them all, to fix a wrong
-/// camera clock or time zone. The result applies to one import only.
+/// Per-import choices: a shoot name for the `{shoot}` template token, and an
+/// override or shift of every capture date to fix a wrong camera clock or time
+/// zone. The result applies to one import only.
 class ImportOptionsDialog extends StatefulWidget {
   const ImportOptionsDialog({super.key, required this.initial});
 
-  final CaptureDateAdjustment initial;
+  final ImportOptions initial;
 
   @override
   State<ImportOptionsDialog> createState() => _ImportOptionsDialogState();
@@ -20,13 +22,15 @@ class _ImportOptionsDialogState extends State<ImportOptionsDialog> {
   late _DateMode _mode;
   DateTime? _fixed;
   bool _negative = false;
+  late final TextEditingController _shoot;
   late final TextEditingController _hours;
   late final TextEditingController _minutes;
 
   @override
   void initState() {
     super.initState();
-    final initial = widget.initial;
+    final initial = widget.initial.dateAdjustment;
+    _shoot = TextEditingController(text: widget.initial.shoot);
     _fixed = initial.fixed;
     _mode = initial.fixed != null
         ? _DateMode.fixed
@@ -41,6 +45,7 @@ class _ImportOptionsDialogState extends State<ImportOptionsDialog> {
 
   @override
   void dispose() {
+    _shoot.dispose();
     _hours.dispose();
     _minutes.dispose();
     super.dispose();
@@ -71,7 +76,7 @@ class _ImportOptionsDialogState extends State<ImportOptionsDialog> {
     );
   }
 
-  CaptureDateAdjustment? get _result => switch (_mode) {
+  CaptureDateAdjustment? get _adjustment => switch (_mode) {
     _DateMode.none => CaptureDateAdjustment.none,
     _DateMode.fixed =>
       _fixed == null ? null : CaptureDateAdjustment(fixed: _fixed),
@@ -82,22 +87,45 @@ class _ImportOptionsDialogState extends State<ImportOptionsDialog> {
     ),
   };
 
+  ImportOptions? get _result {
+    final adjustment = _adjustment;
+    return adjustment == null
+        ? null
+        : ImportOptions(dateAdjustment: adjustment, shoot: _shoot.text.trim());
+  }
+
   @override
   Widget build(BuildContext context) {
     final fixed = _fixed;
     return AlertDialog(
-      title: const Text('Adjust capture dates'),
+      title: const Text('Import options'),
       content: SizedBox(
         width: 420,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              'Applies to this import only. It changes the folder dates, the '
-              'dates shown here and the modified time of the copies.',
-            ),
+            const Text('These apply to this import only and are not saved.'),
             const SizedBox(height: 16),
+            TextField(
+              controller: _shoot,
+              decoration: const InputDecoration(
+                labelText: 'Shoot name',
+                helperText:
+                    'Used by the {shoot} template token; leave empty to omit',
+              ),
+            ),
+            const SizedBox(height: 24),
+            Text(
+              'Capture dates',
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'Changes the folder dates, the dates shown here and the '
+              'modified time of the copies.',
+            ),
+            const SizedBox(height: 12),
             SegmentedButton<_DateMode>(
               segments: const [
                 ButtonSegment(value: _DateMode.none, label: Text('None')),

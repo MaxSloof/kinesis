@@ -245,7 +245,9 @@ class _KinesisHomeState extends State<KinesisHome> {
     if (library == null) return;
     try {
       final hashes = await Future.wait(
-        _indexRoots(library).map(_media.loadLibraryHashes),
+        _indexRoots(library).map(
+          (root) => _media.loadLibraryHashes(root, candidateSizes: const {}),
+        ),
       );
       if (!mounted) return;
       setState(() {
@@ -328,19 +330,7 @@ class _KinesisHomeState extends State<KinesisHome> {
         '$sourceFileCount files in ${scanned.length} review items',
       );
       final libraryWatch = Stopwatch()..start();
-      final libraryHashesBySize = <int, Set<String>>{};
-      if (_library != null) {
-        final indexes = await Future.wait(
-          _indexRoots(_library!).map(_media.libraryHashesBySize),
-        );
-        for (final index in indexes) {
-          for (final entry in index.entries) {
-            libraryHashesBySize
-                .putIfAbsent(entry.key, () => {})
-                .addAll(entry.value);
-          }
-        }
-      }
+      final libraryHashesBySize = await _libraryHashesFor(scanned);
       libraryWatch.stop();
       final libraryFileCount = libraryHashesBySize.values.fold<int>(
         0,
@@ -453,18 +443,7 @@ class _KinesisHomeState extends State<KinesisHome> {
     _refreshingSource = true;
     try {
       final scanned = await _media.scan(source);
-      final hashesBySize = <int, Set<String>>{};
-      final library = _library;
-      if (library != null) {
-        final indexes = await Future.wait(
-          _indexRoots(library).map(_media.libraryHashesBySize),
-        );
-        for (final index in indexes) {
-          for (final entry in index.entries) {
-            hashesBySize.putIfAbsent(entry.key, () => {}).addAll(entry.value);
-          }
-        }
-      }
+      final hashesBySize = await _libraryHashesFor(scanned);
       final refreshed = _attachLibraryJpegs(
         await _media.markExisting(scanned, hashesBySize),
         await _libraryJpegs(),
@@ -969,6 +948,28 @@ class _KinesisHomeState extends State<KinesisHome> {
       MediaKind.cr3 => _cr3Template,
       _ => _template,
     };
+  }
+
+  /// Library hashes for files the same size as a source file; only those can
+  /// be duplicates, so the rest of the library is never read.
+  Future<Map<int, Set<String>>> _libraryHashesFor(
+    List<ReviewItem> scanned,
+  ) async {
+    final merged = <int, Set<String>>{};
+    final library = _library;
+    if (library == null) return merged;
+    final sizes = await _media.sourceSizes(scanned);
+    final indexes = await Future.wait(
+      _indexRoots(
+        library,
+      ).map((root) => _media.libraryHashesBySize(root, candidateSizes: sizes)),
+    );
+    for (final index in indexes) {
+      for (final entry in index.entries) {
+        merged.putIfAbsent(entry.key, () => {}).addAll(entry.value);
+      }
+    }
+    return merged;
   }
 
   Iterable<String> _indexRoots(String library) => {
@@ -2797,12 +2798,7 @@ class _IngestProgressDialog extends StatelessWidget {
   @override
   Widget build(BuildContext context) => AlertDialog(
     title: const Text('Ingesting'),
-    actions: [
-      TextButton(
-        onPressed: onMinimize,
-        child: const Text('Minimize'),
-      ),
-    ],
+    actions: [TextButton(onPressed: onMinimize, child: const Text('Minimize'))],
     content: SizedBox(
       width: 380,
       child: ValueListenableBuilder<_IngestProgress>(

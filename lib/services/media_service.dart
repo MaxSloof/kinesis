@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
@@ -12,8 +13,20 @@ import '../domain/media.dart';
 import 'saf_storage.dart';
 
 class MediaService {
+  MediaService({Future<String> Function(String path)? localHasher})
+    : _localHasher = localHasher ?? _sha256InIsolate;
+
+  /// Index file format. Version 2 (every entry hashed) is still read; version 3
+  /// makes `hash` optional so files are only hashed when a size collides with
+  /// a source file.
+  static const _indexVersion = 3;
+  static const _hashConcurrency = 3;
   static final _libraryIndexLoads = <String, Future<Set<String>>>{};
-  static final _libraryHashesBySize = <String, Map<int, Set<String>>>{};
+  static final _hashesBySizeByLoad = <String, Map<int, Set<String>>>{};
+  static final _safIndexes = <String, Map<String, _LibraryFile>>{};
+  static final _hashSlots = _Semaphore(_hashConcurrency);
+
+  final Future<String> Function(String path) _localHasher;
 
   static const _extensions = <String, MediaKind>{
     '.jpg': MediaKind.jpeg,
@@ -161,6 +174,19 @@ class MediaService {
     ]..sort((a, b) => a.label.compareTo(b.label));
   }
 
+  Future<int> _sizeOf(MediaFile file) async =>
+      file.sizeBytes ??
+      (SafStorage.isUri(file.path)
+          ? (await SafStorage.instance.stat(file.path))?.length ?? 0
+          : (await File(file.path).stat()).size);
+
+  /// Sizes of all source files. Only library files of these sizes can be
+  /// duplicates, so only those need hashes.
+  Future<Set<int>> sourceSizes(List<ReviewItem> items) async => {
+    for (final item in items)
+      for (final file in item.files) await _sizeOf(file),
+  };
+
   Future<List<ReviewItem>> markExisting(
     List<ReviewItem> items,
     Map<int, Set<String>> existingHashesBySize,
@@ -169,23 +195,25 @@ class MediaService {
     var candidateBytes = 0;
     final marked = <ReviewItem>[];
     for (final item in items) {
+      final sizes = [for (final file in item.files) await _sizeOf(file)];
+      final hashes = await Future.wait([
+        for (var i = 0; i < sizes.length; i++)
+          if (existingHashesBySize.containsKey(sizes[i]))
+            hashFile(item.files[i].path)
+          else
+            Future<String?>.value(),
+      ]);
       final files = <MediaFile>[];
-      for (final file in item.files) {
-        final size =
-            file.sizeBytes ??
-            (SafStorage.isUri(file.path)
-                ? (await SafStorage.instance.stat(file.path))?.length ?? 0
-                : (await File(file.path).stat()).size);
-        final hashes = existingHashesBySize[size];
-        if (hashes != null) candidateCount++;
-        if (hashes != null) candidateBytes += size;
-        files.add(
-          hashes == null
-              ? file
-              : file.withExistingStatus(
-                  hashes.contains(await hashFile(file.path)),
-                ),
-        );
+      for (var i = 0; i < sizes.length; i++) {
+        final file = item.files[i];
+        final candidates = existingHashesBySize[sizes[i]];
+        if (candidates == null) {
+          files.add(file);
+          continue;
+        }
+        candidateCount++;
+        candidateBytes += sizes[i];
+        files.add(file.withExistingStatus(candidates.contains(hashes[i])));
       }
       marked.add(
         item.isPair
@@ -245,153 +273,162 @@ class MediaService {
     String library, {
     Set<int>? candidateSizes,
   }) {
-    final pending = _libraryIndexLoads[library];
+    final key = _loadKey(library, candidateSizes);
+    final pending = _libraryIndexLoads[key];
     if (pending != null) {
       debugPrint('[scan] destination index load joined: $library');
       return pending;
     }
-    return _libraryIndexLoads[library] = _loadLibraryHashes(library)
-        .whenComplete(() {
-          _libraryIndexLoads.remove(library);
+    return _libraryIndexLoads[key] =
+        _loadLibraryHashes(library, candidateSizes, key).whenComplete(() {
+          _libraryIndexLoads.remove(key);
           debugPrint('[scan] destination index load finished: $library');
         });
   }
 
-  Future<Set<String>> _loadLibraryHashes(String library) async {
-    if (SafStorage.isUri(library)) {
-      debugPrint('[scan] SAF destination: enumerating library files');
-      final totalWatch = Stopwatch()..start();
-      final files = await _libraryFiles(library);
-      final hashWatch = Stopwatch()..start();
-      final hashes = await _hashLibraryFiles(files);
-      hashWatch.stop();
-      _libraryHashesBySize[library] = _groupHashesBySize(files, hashes);
-      totalWatch.stop();
-      debugPrint(
-        '[scan] SAF destination indexed: ${files.length} files, '
-        '${hashWatch.elapsedMilliseconds}ms hashing, '
-        '${totalWatch.elapsedMilliseconds}ms total',
-      );
-      return hashes.values.toSet();
-    }
-    debugPrint('[scan] destination index load started: $library');
-    final index = _libraryIndexFile(library);
-    final totalWatch = Stopwatch()..start();
-    if (await index.exists()) {
-      debugPrint('[scan] destination index found: ${index.path}');
-      try {
-        final json =
-            jsonDecode(await index.readAsString()) as Map<String, dynamic>;
-        final entries = (json['files'] as List<dynamic>?)
-            ?.cast<Map<String, dynamic>>();
-        if (entries != null) {
-          debugPrint(
-            '[scan] destination index: validating ${entries.length} entries',
-          );
-          final current = await _libraryFiles(library);
-          final byPath = {for (final file in current) file.path: file};
-          final hashes = <String>{};
-          final hashesBySize = <int, Set<String>>{};
-          var valid = entries.length == current.length;
-          for (final entry in entries) {
-            final file = byPath[entry['path'] as String?];
-            if (file == null ||
-                file.size != entry['size'] ||
-                file.modifiedMilliseconds != entry['modified']) {
-              valid = false;
-              break;
-            }
-            final hash = entry['hash'] as String;
-            hashes.add(hash);
-            hashesBySize.putIfAbsent(entry['size'] as int, () => {}).add(hash);
-          }
-          if (valid) {
-            _libraryHashesBySize[library] = hashesBySize;
-            totalWatch.stop();
-            debugPrint(
-              '[scan] destination index valid: ${current.length} files in '
-              '${totalWatch.elapsedMilliseconds}ms',
-            );
-            return hashes;
-          }
-          final hashWatch = Stopwatch()..start();
-          debugPrint('[scan] destination index stale: rebuilding hashes');
-          final refreshed = await _hashLibraryFiles(current);
-          hashWatch.stop();
-          _libraryHashesBySize[library] = _groupHashesBySize(
-            current,
-            refreshed,
-          );
-          await _writeLibraryIndex(library, current, refreshed);
-          totalWatch.stop();
-          debugPrint(
-            '[scan] destination index rebuilt: ${current.length} files, '
-            '${hashWatch.elapsedMilliseconds}ms hashing, '
-            '${totalWatch.elapsedMilliseconds}ms total',
-          );
-          return refreshed.values.toSet();
-        }
-        // Upgrade the original hash-only index on first use.
-        final hashes = ((json['hashes'] as List<dynamic>?) ?? [])
-            .cast<String>()
-            .toSet();
-        if (hashes.isNotEmpty) {
-          debugPrint('[scan] destination index legacy: upgrading hashes');
-          final current = await _libraryFiles(library);
-          final hashWatch = Stopwatch()..start();
-          final refreshed = await _hashLibraryFiles(current);
-          hashWatch.stop();
-          _libraryHashesBySize[library] = _groupHashesBySize(
-            current,
-            refreshed,
-          );
-          await _writeLibraryIndex(library, current, refreshed);
-          totalWatch.stop();
-          debugPrint(
-            '[scan] destination index upgraded: ${current.length} files, '
-            '${hashWatch.elapsedMilliseconds}ms hashing, '
-            '${totalWatch.elapsedMilliseconds}ms total',
-          );
-          return refreshed.values.toSet();
-        }
-      } on FormatException {
-        // Rebuild a damaged index from the library contents.
+  static String _loadKey(String library, Set<int>? candidateSizes) =>
+      '$library\u0000'
+      '${candidateSizes == null ? '*' : (candidateSizes.toList()..sort()).join(',')}';
+
+  Future<Set<String>> _loadLibraryHashes(
+    String library,
+    Set<int>? candidateSizes,
+    String key,
+  ) async {
+    final files = await _refreshLibraryIndex(library, candidateSizes);
+    final grouped = <int, Set<String>>{};
+    final hashes = <String>{};
+    for (final file in files) {
+      final hash = file.hash;
+      if (hash == null ||
+          (candidateSizes != null && !candidateSizes.contains(file.size))) {
+        continue;
       }
+      hashes.add(hash);
+      grouped.putIfAbsent(file.size, () => {}).add(hash);
     }
-    // A newly created index must contain the complete library, not only the
-    // files that happened to match the current source selection.
-    debugPrint('[scan] destination index missing: enumerating library files');
-    final files = await _libraryFiles(library);
-    final hashWatch = Stopwatch()..start();
-    debugPrint(
-      '[scan] destination index missing: hashing ${files.length} files',
-    );
-    final hashes = await _hashLibraryFiles(files);
-    hashWatch.stop();
-    _libraryHashesBySize[library] = _groupHashesBySize(files, hashes);
-    await _writeLibraryIndex(library, files, hashes);
-    totalWatch.stop();
-    debugPrint(
-      '[scan] destination index created: ${files.length} files, '
-      '${hashWatch.elapsedMilliseconds}ms hashing, '
-      '${totalWatch.elapsedMilliseconds}ms total',
-    );
-    return hashes.values.toSet();
+    _hashesBySizeByLoad[key] = grouped;
+    return hashes;
   }
 
-  Future<Map<int, Set<String>>> libraryHashesBySize(String library) async {
-    if (!SafStorage.isUri(library)) {
-      final index = _libraryIndexFile(library);
-      debugPrint('[scan] destination index: checking ${index.path}');
+  /// Brings the library index in line with the files on disk. Stored hashes
+  /// are reused only while path, size and modified time still match, and only
+  /// files whose size is in [candidateSizes] (all files when null) are hashed.
+  Future<List<_LibraryFile>> _refreshLibraryIndex(
+    String library,
+    Set<int>? candidateSizes,
+  ) async {
+    final totalWatch = Stopwatch()..start();
+    final isSaf = SafStorage.isUri(library);
+    final current = await _libraryFiles(library);
+    final stored = isSaf ? null : await _readLibraryIndex(library);
+    final known = isSaf ? _safIndexes[library] : stored?.files;
+    var dirty = !isSaf && (stored == null || stored.version != _indexVersion);
+    if (known == null || known.length != current.length) dirty = true;
+    final merged = <_LibraryFile>[];
+    for (final file in current) {
+      final previous = known?[file.path];
+      if (previous != null &&
+          previous.size == file.size &&
+          previous.modifiedMilliseconds == file.modifiedMilliseconds) {
+        merged.add(
+          previous.hash == null ? file : file.withHash(previous.hash!),
+        );
+      } else {
+        merged.add(file);
+        dirty = true;
+      }
     }
+    final pending = [
+      for (var index = 0; index < merged.length; index++)
+        if (merged[index].hash == null &&
+            (candidateSizes == null ||
+                candidateSizes.contains(merged[index].size)))
+          index,
+    ];
+    final hashWatch = Stopwatch()..start();
+    final hashes = await Future.wait([
+      for (final index in pending) hashFile(merged[index].absolutePath),
+    ]);
+    hashWatch.stop();
+    for (var i = 0; i < pending.length; i++) {
+      merged[pending[i]] = merged[pending[i]].withHash(hashes[i]);
+    }
+    if (pending.isNotEmpty) dirty = true;
+    if (isSaf) {
+      _safIndexes[library] = {for (final file in merged) file.path: file};
+    } else if (dirty) {
+      await _writeLibraryIndex(library, merged);
+    }
+    totalWatch.stop();
+    debugPrint(
+      '[scan] destination index: ${merged.length} files, ${pending.length} '
+      'hashed in ${hashWatch.elapsedMilliseconds}ms, '
+      '${totalWatch.elapsedMilliseconds}ms total',
+    );
+    return merged;
+  }
+
+  /// Reads `.kinesis/index.json`. A missing, corrupt or unknown-version index
+  /// is treated as absent, so the caller rebuilds it from the library files.
+  Future<_StoredIndex?> _readLibraryIndex(String library) async {
+    final index = _libraryIndexFile(library);
+    try {
+      if (!await index.exists()) return null;
+      final decoded = jsonDecode(await index.readAsString());
+      if (decoded is! Map<String, dynamic>) return null;
+      final version = decoded['version'];
+      final entries = decoded['files'];
+      if ((version != 2 && version != _indexVersion) || entries is! List) {
+        return null;
+      }
+      final root = path.normalize(path.absolute(library));
+      final files = <String, _LibraryFile>{};
+      for (final value in entries) {
+        if (value is! Map<String, dynamic> ||
+            value['path'] is! String ||
+            value['size'] is! int ||
+            value['modified'] is! int ||
+            (value['hash'] != null && value['hash'] is! String) ||
+            (version == 2 && value['hash'] == null)) {
+          return null;
+        }
+        final relativePath = path.normalize(value['path'] as String);
+        final absolutePath = path.normalize(path.join(root, relativePath));
+        if (path.isAbsolute(relativePath) ||
+            !path.isWithin(root, absolutePath)) {
+          return null;
+        }
+        files[relativePath] = _LibraryFile(
+          path: relativePath,
+          size: value['size'] as int,
+          modifiedMilliseconds: value['modified'] as int,
+          absolutePath: absolutePath,
+          name: path.basename(absolutePath),
+          hash: value['hash'] as String?,
+        );
+      }
+      return _StoredIndex(version as int, files);
+    } on Object catch (error) {
+      debugPrint('[scan] destination index unreadable, rebuilding: $error');
+      return null;
+    }
+  }
+
+  Future<Map<int, Set<String>>> libraryHashesBySize(
+    String library, {
+    Set<int>? candidateSizes,
+  }) async {
     final refreshWatch = Stopwatch()..start();
-    await loadLibraryHashes(library);
+    await loadLibraryHashes(library, candidateSizes: candidateSizes);
     refreshWatch.stop();
-    final hashes = _libraryHashesBySize[library] ?? const <int, Set<String>>{};
+    final hashes =
+        _hashesBySizeByLoad[_loadKey(library, candidateSizes)] ??
+        const <int, Set<String>>{};
     debugPrint(
       '[scan] destination index refresh: ${refreshWatch.elapsedMilliseconds}ms, '
       '${hashes.values.fold<int>(0, (total, values) => total + values.length)} '
-      'files in ${hashes.length} size groups',
+      'hashes in ${hashes.length} size groups',
     );
     return {
       for (final entry in hashes.entries)
@@ -399,43 +436,22 @@ class MediaService {
     };
   }
 
-  Map<int, Set<String>> _groupHashesBySize(
-    List<_LibraryFile> files,
-    Map<String, String> hashesByPath,
-  ) {
-    final grouped = <int, Set<String>>{};
-    for (final file in files) {
-      final hash = hashesByPath[file.path];
-      if (hash != null) grouped.putIfAbsent(file.size, () => {}).add(hash);
-    }
-    return grouped;
-  }
-
   Future<void> writeLibraryHashes(
     String library,
     Set<String> hashes, {
     Map<String, String>? pathsByHash,
   }) async {
-    final current = await _libraryFiles(library);
-    final entries = await _hashLibraryFiles(current);
-    await _writeLibraryIndex(library, current, entries);
+    await loadLibraryHashes(library);
   }
 
   Future<void> writeImportedAssetsToLibraryIndex(
     String library,
     Iterable<ImportedAsset> assets,
   ) async {
-    if (SafStorage.isUri(library)) {
-      final grouped = _libraryHashesBySize.putIfAbsent(library, () => {});
-      for (final asset in assets) {
-        final size = asset.sizeBytes;
-        if (size != null) grouped.putIfAbsent(size, () => {}).add(asset.hash);
-      }
-      return;
-    }
+    // SAF libraries have no on-disk index; hashes are re-read lazily.
+    if (SafStorage.isUri(library)) return;
     final root = path.normalize(path.absolute(library));
     final additions = <String, _LibraryFile>{};
-    final addedHashes = <String, String>{};
     for (final asset in assets) {
       final absolutePath = path.normalize(path.absolute(asset.path));
       if (!path.isWithin(root, absolutePath)) continue;
@@ -447,92 +463,42 @@ class MediaService {
         modifiedMilliseconds: stat.modified.millisecondsSinceEpoch,
         absolutePath: absolutePath,
         name: path.basename(absolutePath),
+        hash: asset.hash,
       );
-      addedHashes[relativePath] = asset.hash;
     }
     if (additions.isEmpty) return;
 
-    final filesByPath = <String, _LibraryFile>{};
-    final hashesByPath = <String, String>{};
-    var indexIsUsable = false;
-    final index = _libraryIndexFile(root);
-    if (await index.exists()) {
-      try {
-        final decoded = jsonDecode(await index.readAsString());
-        if (decoded is Map<String, dynamic> &&
-            decoded['version'] == 2 &&
-            decoded['files'] is List<dynamic>) {
-          indexIsUsable = true;
-          for (final value in decoded['files'] as List<dynamic>) {
-            if (value is! Map<String, dynamic> ||
-                value['path'] is! String ||
-                value['hash'] is! String ||
-                value['size'] is! int ||
-                value['modified'] is! int) {
-              indexIsUsable = false;
-              break;
-            }
-            final relativePath = path.normalize(value['path'] as String);
-            final absolutePath = path.normalize(
-              path.absolute(path.join(root, relativePath)),
-            );
-            if (path.isAbsolute(relativePath) ||
-                !path.isWithin(root, absolutePath)) {
-              indexIsUsable = false;
-              break;
-            }
-            filesByPath[relativePath] = _LibraryFile(
-              path: relativePath,
-              size: value['size'] as int,
-              modifiedMilliseconds: value['modified'] as int,
-              absolutePath: absolutePath,
-              name: path.basename(absolutePath),
-            );
-            hashesByPath[relativePath] = value['hash'] as String;
-          }
-        }
-      } on FormatException {
-        // Rebuild a damaged index before applying the imported-file updates.
-      }
-    }
-
-    if (!indexIsUsable) {
-      final existingFiles = await _libraryFiles(root);
-      filesByPath
-        ..clear()
-        ..addEntries(existingFiles.map((file) => MapEntry(file.path, file)));
-      hashesByPath
-        ..clear()
-        ..addAll(await _hashLibraryFiles(existingFiles));
-    }
-    filesByPath.addAll(additions);
-    hashesByPath.addAll(addedHashes);
+    final stored = await _readLibraryIndex(root);
+    final filesByPath = <String, _LibraryFile>{
+      if (stored != null)
+        ...stored.files
+      else
+        for (final file in await _libraryFiles(root)) file.path: file,
+      ...additions,
+    };
     final files = filesByPath.values.toList()
       ..sort((a, b) => a.path.compareTo(b.path));
-    await _writeLibraryIndex(root, files, hashesByPath);
-    _libraryHashesBySize[library] = _groupHashesBySize(files, hashesByPath);
+    await _writeLibraryIndex(root, files);
   }
 
   Future<void> _writeLibraryIndex(
     String library,
     List<_LibraryFile> files,
-    Map<String, String> hashes,
   ) async {
     final index = _libraryIndexFile(library);
     final temporary = File(
       '${index.path}.tmp.$pid.${DateTime.now().microsecondsSinceEpoch}',
     );
     final contents = jsonEncode({
-      'version': 2,
+      'version': _indexVersion,
       'files': [
         for (final file in files)
-          if (hashes.containsKey(file.path))
-            {
-              'path': file.path,
-              'hash': hashes[file.path],
-              'size': file.size,
-              'modified': file.modifiedMilliseconds,
-            },
+          {
+            'path': file.path,
+            if (file.hash != null) 'hash': file.hash,
+            'size': file.size,
+            'modified': file.modifiedMilliseconds,
+          },
       ],
     });
     try {
@@ -614,7 +580,7 @@ class MediaService {
       if (await index.exists()) {
         final decoded = jsonDecode(await index.readAsString());
         if (decoded is Map<String, dynamic> &&
-            decoded['version'] == 2 &&
+            (decoded['version'] == 2 || decoded['version'] == 3) &&
             decoded['files'] is List<dynamic>) {
           final jpegs = <String, MediaFile>{};
           for (final value in decoded['files'] as List<dynamic>) {
@@ -731,18 +697,18 @@ class MediaService {
     return files;
   }
 
-  Future<Map<String, String>> _hashLibraryFiles(
-    List<_LibraryFile> files,
-  ) async => {
-    for (final file in files) file.path: await hashFile(file.absolutePath),
-  };
-
+  /// The single entry point for SHA-256 of a file. Local files are hashed in
+  /// worker isolates, a few at a time, so the UI isolate stays responsive.
   Future<String> hashFile(String filePath) async {
     if (SafStorage.isUri(filePath)) {
       return SafStorage.instance.hashFile(filePath);
     }
-    final digest = await sha256.bind(File(filePath).openRead()).first;
-    return digest.toString();
+    await _hashSlots.acquire();
+    try {
+      return await _localHasher(filePath);
+    } finally {
+      _hashSlots.release();
+    }
   }
 
   String _formatBytes(int bytes) {
@@ -954,6 +920,7 @@ class _LibraryFile {
     required this.modifiedMilliseconds,
     required this.absolutePath,
     required this.name,
+    this.hash,
   });
 
   final String path;
@@ -961,7 +928,52 @@ class _LibraryFile {
   final int modifiedMilliseconds;
   final String absolutePath;
   final String name;
+  final String? hash;
+
+  _LibraryFile withHash(String value) => _LibraryFile(
+    path: path,
+    size: size,
+    modifiedMilliseconds: modifiedMilliseconds,
+    absolutePath: absolutePath,
+    name: name,
+    hash: value,
+  );
 }
+
+class _StoredIndex {
+  const _StoredIndex(this.version, this.files);
+  final int version;
+  final Map<String, _LibraryFile> files;
+}
+
+class _Semaphore {
+  _Semaphore(this._available);
+  int _available;
+  final _waiting = <Completer<void>>[];
+
+  Future<void> acquire() {
+    if (_available > 0) {
+      _available--;
+      return Future.value();
+    }
+    final waiter = Completer<void>();
+    _waiting.add(waiter);
+    return waiter.future;
+  }
+
+  void release() {
+    if (_waiting.isEmpty) {
+      _available++;
+    } else {
+      _waiting.removeAt(0).complete();
+    }
+  }
+}
+
+Future<String> _sha256InIsolate(String filePath) => Isolate.run(() async {
+  final digest = await sha256.bind(File(filePath).openRead()).first;
+  return digest.toString();
+});
 
 class ImportedAsset {
   const ImportedAsset({

@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kinesis/domain/media.dart';
 import 'package:kinesis/services/media_service.dart';
@@ -334,6 +335,196 @@ void main() {
     final items = await MediaService().scan(source.path);
     expect(items, hasLength(2));
     expect(items.every((item) => item.jpeg!.captureDate == null), isTrue);
+  });
+
+  group('library index', () {
+    late Directory library;
+    late List<String> hashed;
+    late MediaService service;
+
+    setUp(() async {
+      library = await Directory.systemTemp.createTemp('kinesis-index-');
+      hashed = [];
+      service = MediaService(
+        localHasher: (filePath) async {
+          hashed.add(filePath);
+          return sha256.convert(await File(filePath).readAsBytes()).toString();
+        },
+      );
+    });
+    tearDown(() => library.delete(recursive: true));
+
+    Future<File> write(String name, List<int> bytes) async {
+      final file = File('${library.path}/$name');
+      await file.parent.create(recursive: true);
+      await file.writeAsBytes(bytes);
+      return file;
+    }
+
+    Future<List<Map<String, dynamic>>> entries() async {
+      final json =
+          jsonDecode(
+                await File(
+                  '${library.path}/.kinesis/index.json',
+                ).readAsString(),
+              )
+              as Map<String, dynamic>;
+      expect(json['version'], 3);
+      return (json['files'] as List<dynamic>).cast<Map<String, dynamic>>();
+    }
+
+    test('adding a file hashes only the new file', () async {
+      await write('A.JPG', [1, 2, 3]);
+      await write('B.JPG', [4, 5, 6]);
+      await service.loadLibraryHashes(library.path);
+      final added = await write('C.JPG', [7, 8, 9]);
+      hashed.clear();
+
+      final hashes = await service.loadLibraryHashes(library.path);
+
+      expect(hashed, [added.path]);
+      expect(hashes, hasLength(3));
+    });
+
+    test('a file with a new size or modified time is hashed again', () async {
+      final resized = await write('A.JPG', [1, 2, 3]);
+      final touched = await write('B.JPG', [4, 5, 6]);
+      await write('C.JPG', [7, 8, 9]);
+      await service.loadLibraryHashes(library.path);
+      await resized.writeAsBytes([1, 2, 3, 4]);
+      await touched.setLastModified(DateTime(2001, 2, 3));
+      hashed.clear();
+
+      await service.loadLibraryHashes(library.path);
+
+      expect(hashed.toSet(), {resized.path, touched.path});
+    });
+
+    test('a deleted file leaves the index', () async {
+      final gone = await write('A.JPG', [1, 2, 3]);
+      await write('B.JPG', [4, 5, 6]);
+      await service.loadLibraryHashes(library.path);
+      await gone.delete();
+      hashed.clear();
+
+      await service.loadLibraryHashes(library.path);
+
+      expect(hashed, isEmpty);
+      expect((await entries()).map((entry) => entry['path']), ['B.JPG']);
+    });
+
+    test(
+      'only library files whose size matches the source are hashed',
+      () async {
+        for (var i = 0; i < 5; i++) {
+          await write('IMG_$i.JPG', List.filled(10 + i, i));
+        }
+
+        final bySize = await service.libraryHashesBySize(
+          library.path,
+          candidateSizes: {12},
+        );
+
+        expect(hashed, ['${library.path}/IMG_2.JPG']);
+        expect(bySize.keys, [12]);
+        final stored = await entries();
+        expect(stored, hasLength(5));
+        expect(
+          stored.where((entry) => entry.containsKey('hash')),
+          hasLength(1),
+        );
+      },
+    );
+
+    test('hashes are filled in on demand and kept for later scans', () async {
+      await write('A.JPG', [1, 2, 3]);
+      await write('B.JPG', [4, 5, 6, 7]);
+      await service.libraryHashesBySize(library.path, candidateSizes: {3});
+      hashed.clear();
+
+      await service.libraryHashesBySize(library.path, candidateSizes: {3, 4});
+
+      expect(hashed, ['${library.path}/B.JPG']);
+      expect((await entries()).every((e) => e.containsKey('hash')), isTrue);
+    });
+
+    test('duplicates are found by content, not by size alone', () async {
+      final source = await Directory.systemTemp.createTemp('kinesis-source-');
+      addTearDown(() => source.delete(recursive: true));
+      await write('Lib.JPG', [1, 2, 3]);
+      await File('${source.path}/SAME.JPG').writeAsBytes([1, 2, 3]);
+      await File('${source.path}/OTHER.JPG').writeAsBytes([3, 2, 1]);
+      await File('${source.path}/BIG.JPG').writeAsBytes([1, 2, 3, 4]);
+      final items = await service.scan(source.path);
+
+      final bySize = await service.libraryHashesBySize(
+        library.path,
+        candidateSizes: await service.sourceSizes(items),
+      );
+      final marked = {
+        for (final item in await service.markExisting(items, bySize))
+          item.jpeg!.name: item.jpeg!.alreadyExists,
+      };
+
+      expect(marked, {'SAME.JPG': true, 'OTHER.JPG': false, 'BIG.JPG': false});
+    });
+
+    test('a version 2 index keeps its hashes and upgrades to 3', () async {
+      final file = await write('A.JPG', [1, 2, 3]);
+      final stat = await file.stat();
+      await File('${library.path}/.kinesis/index.json').create(recursive: true);
+      await File('${library.path}/.kinesis/index.json').writeAsString(
+        jsonEncode({
+          'version': 2,
+          'files': [
+            {
+              'path': 'A.JPG',
+              'hash': 'stored-hash',
+              'size': stat.size,
+              'modified': stat.modified.millisecondsSinceEpoch,
+            },
+          ],
+        }),
+      );
+
+      final hashes = await service.loadLibraryHashes(library.path);
+
+      expect(hashed, isEmpty);
+      expect(hashes, {'stored-hash'});
+      expect((await entries()).single['hash'], 'stored-hash');
+    });
+
+    for (final damaged in ['{not json', '{"version":9,"files":[]}', '[]']) {
+      test('index $damaged is rebuilt instead of trusted', () async {
+        final file = await write('A.JPG', [1, 2, 3]);
+        await File(
+          '${library.path}/.kinesis/index.json',
+        ).create(recursive: true);
+        await File(
+          '${library.path}/.kinesis/index.json',
+        ).writeAsString(damaged);
+
+        final hashes = await service.loadLibraryHashes(library.path);
+
+        expect(hashes, {await service.hashFile(file.path)});
+        await entries();
+      });
+    }
+
+    test('hashing many files returns the right digest for each', () async {
+      final real = MediaService();
+      final expected = <String, String>{};
+      for (var i = 0; i < 12; i++) {
+        final file = await write('F$i.JPG', List.generate(1000 + i, (n) => n));
+        expected[file.path] = sha256
+            .convert(await file.readAsBytes())
+            .toString();
+      }
+
+      final actual = await Future.wait(expected.keys.map(real.hashFile));
+
+      expect(actual, expected.values.toList());
+    });
   });
 }
 

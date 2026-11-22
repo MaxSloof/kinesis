@@ -185,10 +185,15 @@ not permanent deletion; you can inspect that folder and restore files manually.
 
 Kinesis stores settings and its app-level record of imported assets in the
 operating system's application-support directory. It also maintains a
-`.kinesis/index.json` hash index in the library to speed up duplicate checks;
-this index is rebuildable from the media files. Android currently calculates
-library hashes through the selected folder grant rather than creating that
-index. Media remains in the folders you choose—Kinesis does not require a
+`.kinesis/index.json` index in the library that lists every media file with its
+size and modified time. A file's SHA-256 is only calculated when it has the
+same size as a file on the source, then stored in the index, so an ingest never
+reads the whole library. Files whose path, size and modified time still match
+reuse their stored hash. The index is a rebuildable cache: if it is missing,
+damaged or from an unknown version, Kinesis rebuilds it. Duplicates are always
+decided by full-content SHA-256. On Android, library hashes are calculated
+through the selected folder grant and kept in memory rather than in an index
+file. Media remains in the folders you choose—Kinesis does not require a
 separate cloud service or proprietary library database.
 
 ## Development

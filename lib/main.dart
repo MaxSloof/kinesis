@@ -10,6 +10,7 @@ import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'domain/capture_date.dart';
 import 'domain/media.dart';
 import 'domain/selection.dart';
 import 'domain/view_options.dart';
@@ -18,6 +19,7 @@ import 'services/media_service.dart';
 import 'services/saf_storage.dart';
 import 'shortcuts.dart';
 import 'widgets/camera_card_picks.dart';
+import 'widgets/import_options_dialog.dart';
 import 'widgets/media_preview.dart';
 
 void main() {
@@ -108,6 +110,9 @@ class _KinesisHomeState extends State<KinesisHome> {
   bool _refreshingSource = false;
   bool _sourceRefreshPending = false;
   bool _ingesting = false;
+
+  /// Applies to the current import only; never saved.
+  CaptureDateAdjustment _dateAdjustment = CaptureDateAdjustment.none;
   final _selection = MediaSelection();
 
   @override
@@ -313,6 +318,7 @@ class _KinesisHomeState extends State<KinesisHome> {
   }
 
   Future<void> _openSource(String selected) async {
+    _dateAdjustment = CaptureDateAdjustment.none;
     final previousSource = _source;
     _source = selected;
     _sourceRefreshTimer?.cancel();
@@ -602,7 +608,7 @@ class _KinesisHomeState extends State<KinesisHome> {
       for (final index in _decisions.keys)
         if (index < _items.length)
           for (final file in _items[index].files)
-            file.path: _items[index].resolvedCaptureDate(),
+            file.path: _items[index].resolvedCaptureDate(_dateAdjustment),
     };
     final duplicateFiles = alreadyInLibraryFiles.length;
     final libraryJpegReferences = _decisions.keys
@@ -628,6 +634,13 @@ class _KinesisHomeState extends State<KinesisHome> {
                 ),
                 const SizedBox(height: 16),
                 _ingestPlanTable(plan, alreadyInLibraryFiles, unchangedFiles),
+                if (_dateAdjustment.description != null) ...[
+                  const SizedBox(height: 16),
+                  Text(
+                    '${_dateAdjustment.description}. Imported files are '
+                    'filed and dated accordingly; source files are not changed.',
+                  ),
+                ],
                 if (libraryJpegReferences > 0) ...[
                   const SizedBox(height: 16),
                   Text(
@@ -753,6 +766,7 @@ class _KinesisHomeState extends State<KinesisHome> {
       }
       _closeProgress(dialogClosed);
       if (mounted) {
+        setState(() => _dateAdjustment = CaptureDateAdjustment.none);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
@@ -1123,6 +1137,15 @@ class _KinesisHomeState extends State<KinesisHome> {
                   ),
                   if (_items.isNotEmpty) ...[
                     IconButton(
+                      onPressed: _showDateAdjustment,
+                      icon: Badge(
+                        isLabelVisible: _dateAdjustment.isActive,
+                        smallSize: 8,
+                        child: const Icon(Icons.schedule_outlined),
+                      ),
+                      tooltip: _dateAdjustment.description ?? 'Adjust dates',
+                    ),
+                    IconButton(
                       onPressed: () => setState(() {
                         _gridMode = !_gridMode;
                         _selection.clear();
@@ -1229,6 +1252,8 @@ class _KinesisHomeState extends State<KinesisHome> {
         switch (action) {
           case 'settings':
             _showSettings();
+          case 'dates':
+            _showDateAdjustment();
           case 'library':
             _showLibrary();
           case 'chooseLibrary':
@@ -1256,6 +1281,12 @@ class _KinesisHomeState extends State<KinesisHome> {
         const PopupMenuItem(value: 'library', child: Text('Open library')),
         const PopupMenuItem(value: 'settings', child: Text('Settings')),
         if (_items.isNotEmpty) ...[
+          PopupMenuItem(
+            value: 'dates',
+            child: Text(
+              _dateAdjustment.isActive ? 'Dates (adjusted)…' : 'Adjust dates…',
+            ),
+          ),
           PopupMenuItem(
             value: 'toggleGrid',
             child: Text(_gridMode ? 'Single image review' : 'Grid review'),
@@ -1447,7 +1478,7 @@ class _KinesisHomeState extends State<KinesisHome> {
             ),
           const SizedBox(height: 4),
           Text(
-            '${MediaViewOrder.captureDateLabel(item.captureDate)}  ·  '
+            '${MediaViewOrder.captureDateLabel(item.resolvedCaptureDate(_dateAdjustment))}  ·  '
             '${MediaViewOrder.sizeLabel(item.sizeBytes)}',
             style: Theme.of(context).textTheme.bodySmall,
           ),
@@ -1513,7 +1544,7 @@ class _KinesisHomeState extends State<KinesisHome> {
   List<MediaDateGroup<int>> _gridGroups() => _groupByDate
       ? MediaViewOrder.groupByCaptureDate<int>(
           _displayOrder,
-          (index) => _items[index].captureDate,
+          (index) => _items[index].resolvedCaptureDate(_dateAdjustment),
           newestFirst: _sortOrder != MediaSortOrder.captureOldest,
         )
       : [MediaDateGroup(label: '', items: _displayOrder)];
@@ -1826,7 +1857,7 @@ class _KinesisHomeState extends State<KinesisHome> {
     final groups = _groupByDate
         ? MediaViewOrder.groupByCaptureDate<int>(
             visibleOrder,
-            (index) => _items[index].captureDate,
+            (index) => _items[index].resolvedCaptureDate(_dateAdjustment),
             newestFirst: _sortOrder != MediaSortOrder.captureOldest,
           )
         : [MediaDateGroup(label: '', items: visibleOrder)];
@@ -2156,6 +2187,15 @@ class _KinesisHomeState extends State<KinesisHome> {
         onPressed: () => _decide(decision),
         child: Text('$key  $label'),
       );
+
+  Future<void> _showDateAdjustment() async {
+    final adjustment = await showDialog<CaptureDateAdjustment>(
+      context: context,
+      builder: (context) => ImportOptionsDialog(initial: _dateAdjustment),
+    );
+    if (adjustment == null || !mounted) return;
+    setState(() => _dateAdjustment = adjustment);
+  }
 
   Future<void> _showSettings() async {
     final controller = TextEditingController(text: _template);

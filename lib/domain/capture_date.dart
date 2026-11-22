@@ -9,7 +9,33 @@ class CaptureDateAdjustment {
   final DateTime? fixed;
   final Duration shift;
 
+  /// A shift of [hours] and [minutes] forward, or backward when [negative].
+  factory CaptureDateAdjustment.shiftBy({
+    bool negative = false,
+    int hours = 0,
+    int minutes = 0,
+  }) {
+    final shift = Duration(hours: hours, minutes: minutes);
+    return CaptureDateAdjustment(shift: negative ? -shift : shift);
+  }
+
   bool get isActive => fixed != null || shift != Duration.zero;
+
+  /// One line for the plan and review UI, or null when nothing is adjusted.
+  String? get description {
+    final fixed = this.fixed;
+    if (fixed != null) return 'Capture date set to ${_format(fixed)}';
+    if (shift == Duration.zero) return null;
+    final total = shift.inMinutes.abs();
+    return 'Capture dates shifted by ${shift.isNegative ? '-' : '+'}'
+        '${total ~/ 60} h ${total % 60} min';
+  }
+
+  static String _format(DateTime date) {
+    String two(int value) => value.toString().padLeft(2, '0');
+    return '${date.year}-${two(date.month)}-${two(date.day)} '
+        '${two(date.hour)}:${two(date.minute)}';
+  }
 }
 
 /// The date a file is filed and labelled under: the user's override, else the

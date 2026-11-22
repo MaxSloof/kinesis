@@ -164,6 +164,12 @@ cameras disagree on whether it is UTC or local time. After a verified copy,
 Kinesis sets the copy's last-modified time to the capture date (not on
 Android); source files are never modified.
 
+If the camera clock or time zone was wrong, use **Adjust dates** in the review
+screen to set one fixed date and time for the whole import or to shift every
+capture date by hours and minutes. The review labels, date groups, folders and
+modified times of the copies use the adjusted dates, and the confirm dialog
+says so. The setting applies to one import and is not saved.
+
 Enable **Use separate JPEG and CRAW folders** to configure distinct templates
 for JPEG and CR3 files. Their defaults are `JPEG/{year}/{year}-{month}-{day}`
 and `CRAW/{year}/{year}-{month}-{day}`. Other supported media types continue

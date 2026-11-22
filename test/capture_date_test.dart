@@ -2,11 +2,13 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kinesis/domain/capture_date.dart';
 import 'package:kinesis/domain/media.dart';
 import 'package:kinesis/services/cr3_metadata.dart';
 import 'package:kinesis/services/media_service.dart';
+import 'package:kinesis/widgets/import_options_dialog.dart';
 
 void main() {
   group('resolveCaptureDate', () {
@@ -73,6 +75,70 @@ void main() {
         ),
         DateTime(2025, 1, 1, 0, 30),
       );
+    });
+  });
+
+  group('CaptureDateAdjustment', () {
+    test('describes what it does for the plan', () {
+      expect(CaptureDateAdjustment.none.description, isNull);
+      expect(CaptureDateAdjustment.none.isActive, isFalse);
+      expect(
+        CaptureDateAdjustment.shiftBy(hours: 1, minutes: 30).description,
+        'Capture dates shifted by +1 h 30 min',
+      );
+      expect(
+        CaptureDateAdjustment.shiftBy(negative: true, hours: 8).description,
+        'Capture dates shifted by -8 h 0 min',
+      );
+      expect(
+        CaptureDateAdjustment(fixed: DateTime(2026, 10, 17, 9, 5)).description,
+        'Capture date set to 2026-10-17 09:05',
+      );
+    });
+
+    testWidgets('the dialog returns a shift', (tester) async {
+      CaptureDateAdjustment? result;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) => TextButton(
+              onPressed: () async => result = await showDialog(
+                context: context,
+                builder: (_) => const ImportOptionsDialog(
+                  initial: CaptureDateAdjustment.none,
+                ),
+              ),
+              child: const Text('open'),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Shift'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('−'));
+      await tester.enterText(find.widgetWithText(TextField, 'Hours'), '2');
+      await tester.enterText(find.widgetWithText(TextField, 'Minutes'), '30');
+      await tester.tap(find.text('Apply'));
+      await tester.pumpAndSettle();
+
+      expect(result?.shift, const Duration(hours: -2, minutes: -30));
+    });
+
+    testWidgets('setting a date needs a date before it can be applied', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: ImportOptionsDialog(initial: CaptureDateAdjustment.none),
+        ),
+      );
+      await tester.tap(find.text('Set date'));
+      await tester.pumpAndSettle();
+
+      final apply = tester.widget<FilledButton>(find.byType(FilledButton));
+      expect(apply.onPressed, isNull);
     });
   });
 

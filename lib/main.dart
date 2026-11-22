@@ -2314,6 +2314,7 @@ class _KinesisHomeState extends State<KinesisHome> {
                   controller: controller,
                   decoration: const InputDecoration(
                     labelText: 'Destination template',
+                    helperMaxLines: 3,
                     helperText:
                         'Tokens: {year}, {month}, {day}, {originalName}, {sourceFolder}, '
                         '{shoot}, {camera}, {ext}',

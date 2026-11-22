@@ -102,10 +102,7 @@ flutter build linux  # Linux
 ## Using Kinesis
 
 1. Connect a camera card or other source drive, or choose a local source
-   folder. Kinesis scans it recursively. On desktop, mounted volumes with a
-   `DCIM` folder at their root appear as quick picks next to the folder picker;
-   they are looked up when the screen opens and with the refresh button, not
-   in the background. On Android, choose the folder in the
+   folder. Kinesis scans it recursively. On Android, choose the folder in the
    system folder picker; Kinesis uses the granted Storage Access Framework
    access instead of raw `/storage/...` paths.
 2. Choose a destination library folder with **Set library**. The library can
@@ -146,40 +143,16 @@ Templates accept these tokens:
 
 | Token | Value |
 | --- | --- |
-| `{year}` | Four-digit year of the capture date |
-| `{month}` | Two-digit month of the capture date |
-| `{day}` | Two-digit day of the capture date |
+| `{year}` | Four-digit year from the source file's last-modified timestamp |
+| `{month}` | Two-digit month from the same timestamp |
+| `{day}` | Two-digit day from the same timestamp |
 | `{originalName}` | Original filename, including its extension |
 | `{sourceFolder}` | Name of the folder containing the source file |
-| `{shoot}` | Shoot name from **Import options** for this import; omitted when empty |
-| `{camera}` | Camera make and model from EXIF or CR3 metadata, or `Unknown camera` |
-| `{ext}` | Lower-case file extension without the dot, such as `cr3` |
 
-`{shoot}` and `{camera}` are made safe for use as folder names: path separators
-and characters like `: * ? " < > |` become `-`, and leading or trailing dots,
-dashes and spaces are removed, so a name can't add folders or climb out of the
-library. When no shoot name is set, `{shoot}` disappears together with the
-separators (space, `-`, `_`, `.`, `,`) right after it, a folder left empty is
-dropped, and separators left dangling at the end of a folder name are trimmed:
-`{year}/{shoot} - {day}` becomes `2026/17`, not `2026/ - 17`.
-
-The capture date is the first of these that is available: the EXIF
-`DateTimeOriginal` (JPEG and other images), the capture date stored in a CR3's
-metadata, a date in the file name (`IMG_20261017_143000`, `VID_…`, `DSC_…`,
-`2026-10-17_14-30-00` or `2026-10-17-143000`), and finally the file's
-last-modified time. A JPEG/CR3 pair uses one date, so both files land in the
-same folder. For example, with the default template, a photo taken on
-October 17, 2026 is imported into `2026/2026-10-17/`. Video dates come from the
-file name or last-modified time; the MP4/MOV creation time is not read because
-cameras disagree on whether it is UTC or local time. After a verified copy,
-Kinesis sets the copy's last-modified time to the capture date (not on
-Android); source files are never modified.
-
-Open **Import options** in the review screen to name the shoot and, if the
-camera clock or time zone was wrong, to set one fixed date and time for the
-whole import or to shift every capture date by hours and minutes. The review labels, date groups, folders and
-modified times of the copies use the adjusted dates, and the confirm dialog
-says so. The setting applies to one import and is not saved.
+For example, with the default template and a source file last modified on
+October 17, 2026, Kinesis imports it into `2026/2026-10-17/`. The folder date
+uses the file's last-modified timestamp; it is not necessarily the photo's
+EXIF capture date.
 
 Enable **Use separate JPEG and CRAW folders** to configure distinct templates
 for JPEG and CR3 files. Their defaults are `JPEG/{year}/{year}-{month}-{day}`
@@ -194,12 +167,6 @@ the copied bytes against the source using SHA-256 before placing the copy in
 its destination folder. It does not delete a source file immediately after
 copying it: source cleanup happens after the selected new files have been
 copied and verified.
-
-While importing, Kinesis shows files done out of total, bytes done out of
-total and the current file. When you confirm the plan it first compares the
-bytes to copy with the free space on the library volume and stops with a
-message if there isn't enough. Free space is read with `df` on macOS and Linux;
-on Android and Windows it can't be read, so the check is skipped.
 
 **Confirming the plan can move source files to Trash.** For an item with a
 JPEG/CR3 pair, the decision determines what is imported, but all source files
@@ -218,15 +185,10 @@ not permanent deletion; you can inspect that folder and restore files manually.
 
 Kinesis stores settings and its app-level record of imported assets in the
 operating system's application-support directory. It also maintains a
-`.kinesis/index.json` index in the library that lists every media file with its
-size and modified time. A file's SHA-256 is only calculated when it has the
-same size as a file on the source, then stored in the index, so an ingest never
-reads the whole library. Files whose path, size and modified time still match
-reuse their stored hash. The index is a rebuildable cache: if it is missing,
-damaged or from an unknown version, Kinesis rebuilds it. Duplicates are always
-decided by full-content SHA-256. On Android, library hashes are calculated
-through the selected folder grant and kept in memory rather than in an index
-file. Media remains in the folders you choose—Kinesis does not require a
+`.kinesis/index.json` hash index in the library to speed up duplicate checks;
+this index is rebuildable from the media files. Android currently calculates
+library hashes through the selected folder grant rather than creating that
+index. Media remains in the folders you choose—Kinesis does not require a
 separate cloud service or proprietary library database.
 
 ## Development

@@ -17,6 +17,7 @@ import 'services/cr3_preview.dart';
 import 'services/media_service.dart';
 import 'services/saf_storage.dart';
 import 'shortcuts.dart';
+import 'widgets/camera_card_picks.dart';
 import 'widgets/media_preview.dart';
 
 void main() {
@@ -308,6 +309,10 @@ class _KinesisHomeState extends State<KinesisHome> {
             dialogTitle: 'Choose a camera card or source folder',
           );
     if (selected == null) return;
+    await _openSource(selected);
+  }
+
+  Future<void> _openSource(String selected) async {
     final previousSource = _source;
     _source = selected;
     _sourceRefreshTimer?.cancel();
@@ -1299,6 +1304,10 @@ class _KinesisHomeState extends State<KinesisHome> {
           icon: const Icon(Icons.folder_open),
           label: Text(_scanning ? 'Scanning...' : 'Choose source folder'),
         ),
+        if (!Platform.isAndroid && !Platform.isIOS) ...[
+          const SizedBox(height: 16),
+          CameraCardPicks(enabled: !_scanning, onSelected: _openSource),
+        ],
       ],
     ),
   );

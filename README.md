@@ -102,7 +102,10 @@ flutter build linux  # Linux
 ## Using Kinesis
 
 1. Connect a camera card or other source drive, or choose a local source
-   folder. Kinesis scans it recursively. On Android, choose the folder in the
+   folder. Kinesis scans it recursively. On desktop, mounted volumes with a
+   `DCIM` folder at their root appear as quick picks next to the folder picker;
+   they are looked up when the screen opens and with the refresh button, not
+   in the background. On Android, choose the folder in the
    system folder picker; Kinesis uses the granted Storage Access Framework
    access instead of raw `/storage/...` paths.
 2. Choose a destination library folder with **Set library**. The library can

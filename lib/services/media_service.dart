@@ -9,7 +9,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as path;
 
+import '../domain/capture_date.dart';
 import '../domain/media.dart';
+import 'cr3_metadata.dart';
 import 'saf_storage.dart';
 
 class MediaService {
@@ -40,47 +42,28 @@ class MediaService {
   };
 
   Future<DateTime?> _readCaptureDate(String filePath, MediaKind kind) async {
-    if (kind == MediaKind.cr3 || kind == MediaKind.video) return null;
+    if (kind == MediaKind.video) return null;
     try {
-      final value = SafStorage.isUri(filePath)
+      final isSaf = SafStorage.isUri(filePath);
+      if (kind == MediaKind.cr3) {
+        return isSaf
+            ? cr3CaptureDateFromHead(
+                await SafStorage.instance.readHead(filePath, 1024 * 1024),
+              )
+            : await Isolate.run(() => readCr3CaptureDate(filePath));
+      }
+      final value = isSaf
           ? await _readSafExifDateString(filePath)
           : await Isolate.run(
               () => _readExifDateString(filePath, kind == MediaKind.jpeg),
             );
-      return value == null ? null : _parseExifDate(value);
+      return value == null ? null : parseExifDate(value);
     } on Object catch (error) {
       debugPrint(
         '[metadata] could not read capture date for $filePath: $error',
       );
     }
     return null;
-  }
-
-  DateTime? _parseExifDate(String value) {
-    final match = RegExp(
-      r'^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})',
-    ).firstMatch(value.trim());
-    if (match == null) return null;
-    final parts = [
-      for (var index = 1; index <= 6; index++) int.parse(match[index]!),
-    ];
-    final date = DateTime(
-      parts[0],
-      parts[1],
-      parts[2],
-      parts[3],
-      parts[4],
-      parts[5],
-    );
-    if (date.year != parts[0] ||
-        date.month != parts[1] ||
-        date.day != parts[2] ||
-        date.hour != parts[3] ||
-        date.minute != parts[4] ||
-        date.second != parts[5]) {
-      return null;
-    }
-    return date;
   }
 
   Future<List<ReviewItem>> scan(
@@ -718,15 +701,45 @@ class MediaService {
     return '${(bytes / megabyte).toStringAsFixed(1)} MB';
   }
 
+  /// The date used for the destination folder. Pass the review item's
+  /// [captureDate] so a JPEG and its CR3 share one folder.
+  Future<DateTime> _destinationDate(
+    MediaFile source,
+    DateTime? captureDate,
+    CaptureDateAdjustment adjustment,
+  ) async {
+    if (captureDate != null) return captureDate;
+    final modified =
+        source.modified ??
+        (SafStorage.isUri(source.path)
+            ? null
+            : (await File(source.path).stat()).modified);
+    return resolveCaptureDate(
+          embedded: source.captureDate,
+          fileNames: [source.name],
+          modified: modified,
+          adjustment: adjustment,
+        ) ??
+        DateTime.now();
+  }
+
   Future<ImportedAsset> copyAndVerify(
     MediaFile source,
     String library,
-    String template,
-  ) async {
+    String template, {
+    DateTime? captureDate,
+    CaptureDateAdjustment adjustment = CaptureDateAdjustment.none,
+  }) async {
     if (SafStorage.isUri(library)) {
-      return _copyAndVerifySaf(source, library, template);
+      return _copyAndVerifySaf(
+        source,
+        library,
+        template,
+        captureDate,
+        adjustment,
+      );
     }
-    final date = source.modified ?? (await File(source.path).stat()).modified;
+    final date = await _destinationDate(source, captureDate, adjustment);
     final directory = expandTemplate(
       template,
       date,
@@ -785,8 +798,10 @@ class MediaService {
     MediaFile source,
     String library,
     String template,
+    DateTime? captureDate,
+    CaptureDateAdjustment adjustment,
   ) async {
-    final date = source.modified ?? source.captureDate ?? DateTime.now();
+    final date = await _destinationDate(source, captureDate, adjustment);
     final directory = expandTemplate(
       template,
       date,

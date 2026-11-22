@@ -592,6 +592,13 @@ class _KinesisHomeState extends State<KinesisHome> {
         if (index < _items.length)
           ..._items[index].files.where((file) => file.alreadyExists),
     ];
+    // A JPEG and its CR3 are filed under one date.
+    final datesByPath = <String, DateTime?>{
+      for (final index in _decisions.keys)
+        if (index < _items.length)
+          for (final file in _items[index].files)
+            file.path: _items[index].resolvedCaptureDate(),
+    };
     final duplicateFiles = alreadyInLibraryFiles.length;
     final libraryJpegReferences = _decisions.keys
         .where((index) => index < _items.length)
@@ -710,6 +717,7 @@ class _KinesisHomeState extends State<KinesisHome> {
             file.withHash(sourceHash),
             _library!,
             _templateFor(file),
+            captureDate: datesByPath[file.path],
           ),
         );
         step('Copying and verifying', file.name);

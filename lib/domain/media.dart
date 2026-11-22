@@ -1,5 +1,7 @@
 import 'dart:io';
 
+import 'capture_date.dart';
+
 enum MediaKind { jpeg, cr3, image, video }
 
 enum ReviewDecision { keepBoth, keepJpeg, keepCr3, deleteBoth }
@@ -39,6 +41,16 @@ class MediaFile {
   final DateTime? captureDate;
 
   String get name => displayName ?? File(path).uri.pathSegments.last;
+
+  /// The date this file is filed and labelled under; see [resolveCaptureDate].
+  DateTime? resolvedCaptureDate([
+    CaptureDateAdjustment adjustment = CaptureDateAdjustment.none,
+  ]) => resolveCaptureDate(
+    embedded: captureDate,
+    fileNames: [name],
+    modified: modified,
+    adjustment: adjustment,
+  );
   String get stem => name.substring(0, name.lastIndexOf('.')).toLowerCase();
   String get pairingKey =>
       '${relativePath == null ? File(path).parent.path : _relativeParent(relativePath!)}'
@@ -117,8 +129,22 @@ class ReviewItem {
         _extensionOf(file.name),
   ].where((format) => format.isNotEmpty).toList();
 
-  DateTime? get captureDate =>
-      jpeg?.captureDate ?? cr3?.captureDate ?? single?.captureDate;
+  DateTime? get captureDate => resolvedCaptureDate();
+
+  /// One date for every file of the item, so a JPEG and its CR3 land in the
+  /// same folder.
+  DateTime? resolvedCaptureDate([
+    CaptureDateAdjustment adjustment = CaptureDateAdjustment.none,
+  ]) {
+    final media = [jpeg, cr3, single].whereType<MediaFile>().toList();
+    return resolveCaptureDate(
+      embedded: media.map((file) => file.captureDate).nonNulls.firstOrNull,
+      fileNames: media.map((file) => file.name),
+      modified: media.map((file) => file.modified).nonNulls.firstOrNull,
+      adjustment: adjustment,
+    );
+  }
+
   int? get sizeBytes {
     final media = files;
     if (media.any((file) => file.sizeBytes == null)) return null;

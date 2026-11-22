@@ -143,16 +143,21 @@ Templates accept these tokens:
 
 | Token | Value |
 | --- | --- |
-| `{year}` | Four-digit year from the source file's last-modified timestamp |
-| `{month}` | Two-digit month from the same timestamp |
-| `{day}` | Two-digit day from the same timestamp |
+| `{year}` | Four-digit year of the capture date |
+| `{month}` | Two-digit month of the capture date |
+| `{day}` | Two-digit day of the capture date |
 | `{originalName}` | Original filename, including its extension |
 | `{sourceFolder}` | Name of the folder containing the source file |
 
-For example, with the default template and a source file last modified on
-October 17, 2026, Kinesis imports it into `2026/2026-10-17/`. The folder date
-uses the file's last-modified timestamp; it is not necessarily the photo's
-EXIF capture date.
+The capture date is the first of these that is available: the EXIF
+`DateTimeOriginal` (JPEG and other images), the capture date stored in a CR3's
+metadata, a date in the file name (`IMG_20261017_143000`, `VID_…`, `DSC_…`,
+`2026-10-17_14-30-00` or `2026-10-17-143000`), and finally the file's
+last-modified time. A JPEG/CR3 pair uses one date, so both files land in the
+same folder. For example, with the default template, a photo taken on
+October 17, 2026 is imported into `2026/2026-10-17/`. Video dates come from the
+file name or last-modified time; the MP4/MOV creation time is not read because
+cameras disagree on whether it is UTC or local time.
 
 Enable **Use separate JPEG and CRAW folders** to configure distinct templates
 for JPEG and CR3 files. Their defaults are `JPEG/{year}/{year}-{month}-{day}`

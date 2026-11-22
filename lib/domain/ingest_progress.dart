@@ -37,7 +37,8 @@ class IngestProgress {
     return ((copyShare + (done - copied)) / total).clamp(0.0, 1.0);
   }
 
-  String get filesLabel => '$done / $total files';
+  String get filesLabel =>
+      '${done < copyTotal ? done : copyTotal} / $copyTotal files';
 
   /// `1.2 GB / 4.0 GB`, or null when no sizes are known.
   String? get bytesLabel => bytesTotal == 0

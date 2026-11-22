@@ -45,6 +45,16 @@ void main() {
       }
     });
 
+    test('files label counts copies, not Trash steps', () {
+      const progress = IngestProgress(
+        phase: 'Moving sources to Trash',
+        done: 4,
+        total: 5,
+        copyTotal: 2,
+      );
+      expect(progress.filesLabel, '2 / 2 files');
+    });
+
     test('an empty import has no fraction', () {
       expect(
         const IngestProgress(phase: 'x', done: 0, total: 0).fraction,

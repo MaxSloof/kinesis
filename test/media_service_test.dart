@@ -8,6 +8,16 @@ import 'package:kinesis/domain/media.dart';
 import 'package:kinesis/services/media_service.dart';
 
 void main() {
+  test('a destination folder that does not exist yet has no hashes', () async {
+    final root = await Directory.systemTemp.createTemp('kinesis-missing-');
+    addTearDown(() => root.delete(recursive: true));
+    final service = MediaService();
+    final missing = '${root.path}/JPEG';
+
+    expect(await service.loadLibraryHashes(missing), isEmpty);
+    expect(await service.scanLibraryHashes(missing), isEmpty);
+  });
+
   test('scan ignores AppleDouble files masquerading as JPEGs', () async {
     final source = await Directory.systemTemp.createTemp('kinesis-scan-');
     addTearDown(() => source.delete(recursive: true));

@@ -247,6 +247,7 @@ class MediaService {
       }
       return hashes;
     }
+    if (!await Directory(library).exists()) return hashes;
     await for (final entity in Directory(
       library,
     ).list(recursive: true, followLinks: false)) {
@@ -671,6 +672,7 @@ class MediaService {
       }
       return files;
     }
+    if (!await Directory(library).exists()) return files;
     await for (final entity in Directory(
       library,
     ).list(recursive: true, followLinks: false)) {

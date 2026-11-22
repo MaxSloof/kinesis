@@ -157,7 +157,9 @@ last-modified time. A JPEG/CR3 pair uses one date, so both files land in the
 same folder. For example, with the default template, a photo taken on
 October 17, 2026 is imported into `2026/2026-10-17/`. Video dates come from the
 file name or last-modified time; the MP4/MOV creation time is not read because
-cameras disagree on whether it is UTC or local time.
+cameras disagree on whether it is UTC or local time. After a verified copy,
+Kinesis sets the copy's last-modified time to the capture date (not on
+Android); source files are never modified.
 
 Enable **Use separate JPEG and CRAW folders** to configure distinct templates
 for JPEG and CR3 files. Their defaults are `JPEG/{year}/{year}-{month}-{day}`

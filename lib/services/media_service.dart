@@ -786,6 +786,12 @@ class MediaService {
       throw FileSystemException('Copied bytes did not verify', source.path);
     }
     await staged.rename(destination.path);
+    try {
+      await destination.setLastModified(date);
+    } on FileSystemException catch (error) {
+      // The copy is verified; a volume that refuses timestamps is not fatal.
+      debugPrint('[import] could not set modified time: $error');
+    }
     return ImportedAsset(
       hash: sourceHash,
       path: destination.path,

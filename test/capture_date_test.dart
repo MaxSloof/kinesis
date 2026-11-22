@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -176,6 +177,36 @@ void main() {
 
       expect(asset.path, contains('/2025/2025-03-04/'));
     });
+
+    test(
+      'the copy gets the capture date as modified time and index entry',
+      () async {
+        final file = File('${source.path}/IMG_0001.CR3');
+        await file.writeAsBytes(_cr3(exifDate: '2025:03:04 05:06:07'));
+        final service = MediaService();
+        final item = (await service.scan(source.path)).single;
+
+        final asset = await service.copyAndVerify(
+          item.cr3!,
+          library.path,
+          '{year}',
+          captureDate: item.resolvedCaptureDate(),
+        );
+        await service.writeImportedAssetsToLibraryIndex(library.path, [asset]);
+
+        final modified = File(asset.path).statSync().modified;
+        expect(modified, DateTime(2025, 3, 4, 5, 6, 7));
+        final index =
+            jsonDecode(
+                  File(
+                    '${library.path}/.kinesis/index.json',
+                  ).readAsStringSync(),
+                )
+                as Map<String, dynamic>;
+        final entry = (index['files'] as List).single as Map<String, dynamic>;
+        expect(entry['modified'], modified.millisecondsSinceEpoch);
+      },
+    );
 
     test('a JPEG and CR3 pair share the item date', () async {
       final service = MediaService();

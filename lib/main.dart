@@ -2379,7 +2379,8 @@ class _KinesisHomeState extends State<KinesisHome> {
                     maxLength: 1,
                     textCapitalization: TextCapitalization.characters,
                     decoration: InputDecoration(
-                      labelText: '${decision.name} shortcut',
+                      labelText: '${decision.label} shortcut',
+                      counterText: '',
                     ),
                   ),
               ],

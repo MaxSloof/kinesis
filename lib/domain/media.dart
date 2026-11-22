@@ -4,7 +4,16 @@ import 'capture_date.dart';
 
 enum MediaKind { jpeg, cr3, image, video }
 
-enum ReviewDecision { keepBoth, keepJpeg, keepCr3, deleteBoth }
+enum ReviewDecision {
+  keepBoth('Keep both'),
+  keepJpeg('Keep JPEG'),
+  keepCr3('Keep CR3'),
+  deleteBoth('Delete both');
+
+  const ReviewDecision(this.label);
+
+  final String label;
+}
 
 String _extensionOf(String name) {
   final dot = name.lastIndexOf('.');

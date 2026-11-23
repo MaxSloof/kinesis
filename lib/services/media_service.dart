@@ -31,6 +31,7 @@ class MediaService {
 
   final Future<String> Function(String path) _localHasher;
 
+  // MediaKind.cr3 stands for any RAW format; the name predates multi-format support.
   static const _extensions = <String, MediaKind>{
     '.jpg': MediaKind.jpeg,
     '.jpeg': MediaKind.jpeg,
@@ -38,6 +39,30 @@ class MediaService {
     '.png': MediaKind.image,
     '.heic': MediaKind.image,
     '.gif': MediaKind.image,
+    '.heif': MediaKind.image,
+    '.webp': MediaKind.image,
+    '.avif': MediaKind.image,
+    '.bmp': MediaKind.image,
+    '.tif': MediaKind.image,
+    '.tiff': MediaKind.image,
+    '.dng': MediaKind.cr3,
+    '.cr2': MediaKind.cr3,
+    '.nef': MediaKind.cr3,
+    '.nrw': MediaKind.cr3,
+    '.arw': MediaKind.cr3,
+    '.srf': MediaKind.cr3,
+    '.sr2': MediaKind.cr3,
+    '.raf': MediaKind.cr3,
+    '.orf': MediaKind.cr3,
+    '.rw2': MediaKind.cr3,
+    '.pef': MediaKind.cr3,
+    '.srw': MediaKind.cr3,
+    '.3fr': MediaKind.cr3,
+    '.iiq': MediaKind.cr3,
+    '.erf': MediaKind.cr3,
+    '.kdc': MediaKind.cr3,
+    '.mrw': MediaKind.cr3,
+    '.x3f': MediaKind.cr3,
     '.mp4': MediaKind.video,
     '.mov': MediaKind.video,
   };
@@ -51,7 +76,7 @@ class MediaService {
     if (kind == MediaKind.video) return none;
     try {
       final isSaf = SafStorage.isUri(filePath);
-      if (kind == MediaKind.cr3) {
+      if (path.extension(filePath).toLowerCase() == '.cr3') {
         final cr3 = isSaf
             ? cr3MetadataFromHead(
                 await SafStorage.instance.readHead(filePath, 1024 * 1024),
@@ -905,6 +930,12 @@ class MediaService {
         '.png' => 'image/png',
         '.heic' => 'image/heic',
         '.gif' => 'image/gif',
+        '.heif' => 'image/heif',
+        '.webp' => 'image/webp',
+        '.avif' => 'image/avif',
+        '.bmp' => 'image/bmp',
+        '.tif' || '.tiff' => 'image/tiff',
+        '.dng' => 'image/x-adobe-dng',
         '.mp4' => 'video/mp4',
         '.mov' => 'video/quicktime',
         _ => 'application/octet-stream',

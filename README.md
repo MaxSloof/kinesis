@@ -49,12 +49,13 @@ Kinesis scans these filename extensions (case-insensitively):
 | --- | --- |
 | JPEG | `.jpg`, `.jpeg` |
 | Canon RAW | `.cr3` |
-| Other images | `.png`, `.heic`, `.gif` |
+| Other images | `.png`, `.heic`, `.heif`, `.gif`, `.webp`, `.avif`, `.bmp`, `.tif`, `.tiff` |
+| Other RAW (paired like CR3) | `.dng`, `.cr2`, `.nef`, `.nrw`, `.arw`, `.srf`, `.sr2`, `.raf`, `.orf`, `.rw2`, `.pef`, `.srw`, `.3fr`, `.iiq`, `.erf`, `.kdc`, `.mrw`, `.x3f` |
 | Video | `.mp4`, `.mov` |
 
-JPEG and CR3 files with the same name in the same folder are treated as a
+JPEG and RAW files with the same name in the same folder are treated as a
 paired shot. Kinesis displays image previews where the desktop image decoder
-supports them and can extract a preview JPEG embedded in a CR3. Video files
+supports them and can extract a preview JPEG embedded in a RAW. Video files
 can be imported and listed, but video playback is not currently provided.
 
 ## Install and run

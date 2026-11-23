@@ -895,7 +895,7 @@ class _KinesisHomeState extends State<KinesisHome> {
       final cr3Count = files.where((file) => file.kind == MediaKind.cr3).length;
       final otherCount = files.length - jpegCount - cr3Count;
       final values = header
-          ? [action, 'JPEG', 'CR3', 'Other', 'Total']
+          ? [action, 'JPEG', 'RAW', 'Other', 'Total']
           : [
               action,
               '$jpegCount',

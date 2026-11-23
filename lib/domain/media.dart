@@ -135,10 +135,10 @@ class ReviewItem {
   }
 
   /// Compact format labels for the badge row, e.g. `JPEG` and `CR3` for a
-  /// pair, or the file extension for a single image or video.
+  /// pair (or the RAW's own extension), or the file extension for a single image or video.
   List<String> get formats => [
     if (jpeg != null) 'JPEG',
-    if (cr3 != null) 'CR3',
+    if (cr3 != null) _extensionOf(cr3!.name),
     for (final file in files)
       if (file.kind == MediaKind.image || file.kind == MediaKind.video)
         _extensionOf(file.name),

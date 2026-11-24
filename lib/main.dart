@@ -675,9 +675,8 @@ class _KinesisHomeState extends State<KinesisHome> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
-                  'Only files in “Copy / verify candidates” can be written to '
-                  'the library. Source files listed for Trash are a separate '
-                  'action and move after copies are verified.',
+                  'Kinesis moves source files to Trash only after their '
+                  'copies are verified.',
                 ),
                 const SizedBox(height: 16),
                 _ingestPlanTable(plan, alreadyInLibraryFiles, unchangedFiles),
@@ -690,26 +689,21 @@ class _KinesisHomeState extends State<KinesisHome> {
                         'Shoot name: ${_importOptions.shoot.trim()}',
                     ].join('. '),
                   ),
-                  const Text(
-                    'Imported files are filed and dated accordingly; source '
-                    'files are not changed.',
-                  ),
+                  const Text('Kinesis does not change the source files.'),
                 ],
                 if (libraryJpegReferences > 0) ...[
                   const SizedBox(height: 16),
                   Text(
-                    '$libraryJpegReferences matching '
-                    '${libraryJpegReferences == 1 ? 'JPEG' : 'JPEGs'} in the '
-                    'library '
-                    '${libraryJpegReferences == 1 ? 'is' : 'are'} '
-                    'preview-only; they will not be copied or moved.',
+                    'Kinesis leaves the $libraryJpegReferences matching '
+                    '${libraryJpegReferences == 1 ? 'JPEG' : 'JPEGs'} already '
+                    'in the library unchanged.',
                   ),
                 ],
                 const SizedBox(height: 12),
                 const Text(
-                  'If multiple selected source files have identical content, '
-                  'only the first is copied; later copies are skipped. Files '
-                  'with no decision remain unchanged.',
+                  'When selected source files have identical content, Kinesis '
+                  'copies only the first. Files without a decision stay '
+                  'unchanged.',
                 ),
               ],
             ),
@@ -1415,12 +1409,9 @@ class _KinesisHomeState extends State<KinesisHome> {
         const Icon(Icons.add_to_photos_outlined, size: 64),
         const SizedBox(height: 16),
         const Text(
-          'Ingest media you can trust',
+          'Review camera files, verify copies, then trash the sources',
           style: TextStyle(fontSize: 24, fontWeight: FontWeight.w600),
-        ),
-        const SizedBox(height: 8),
-        const Text(
-          'Review camera files, verify copies, then clean the source.',
+          textAlign: TextAlign.center,
         ),
         const SizedBox(height: 24),
         FilledButton.icon(
@@ -2250,26 +2241,12 @@ class _KinesisHomeState extends State<KinesisHome> {
             children: [
               Icon(icon, color: foreground, size: 22),
               const SizedBox(width: 10),
-              Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'SELECTED ACTION',
-                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                      color: foreground,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 0.8,
-                    ),
-                  ),
-                  Text(
-                    _selectedActionLabel(decision),
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      color: foreground,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ],
+              Text(
+                _selectedActionLabel(decision),
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  color: foreground,
+                  fontWeight: FontWeight.w700,
+                ),
               ),
             ],
           ),
@@ -2396,7 +2373,7 @@ class _KinesisHomeState extends State<KinesisHome> {
                     title: const Text('Move source files to Trash'),
                     subtitle: const Text(
                       'After a verified ingest, trash the source files you '
-                      'marked. Turn off to always keep sources.',
+                      'marked.',
                     ),
                     onChanged: (value) =>
                         setDialogState(() => trashSources = value),

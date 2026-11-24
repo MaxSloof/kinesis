@@ -23,6 +23,7 @@ import 'shortcuts.dart';
 import 'widgets/camera_card_picks.dart';
 import 'widgets/import_options_dialog.dart';
 import 'widgets/media_preview.dart';
+import 'widgets/welcome_guide.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -86,6 +87,7 @@ class _KinesisHomeState extends State<KinesisHome> {
   bool _splitRawAndJpeg = false;
   bool _vimKeys = true;
   bool _trashSources = true;
+  bool _welcomeGuideSeen = false;
   String _jpegTemplate = 'JPEG/{year}/{year}-{month}-{day}';
   String _cr3Template = 'CRAW/{year}/{year}-{month}-{day}';
   Map<ReviewDecision, String> _shortcuts = {
@@ -190,6 +192,38 @@ class _KinesisHomeState extends State<KinesisHome> {
 
   void _toggleDateGrouping() => setState(() => _groupByDate = !_groupByDate);
 
+  Widget _helpMenu() => PopupMenuButton<VoidCallback>(
+    tooltip: 'Help',
+    icon: const Icon(Icons.help_outline),
+    onSelected: (action) => action(),
+    itemBuilder: (context) => [
+      PopupMenuItem(
+        value: _showWelcomeGuide,
+        child: const ListTile(
+          leading: Icon(Icons.school_outlined),
+          title: Text('Replay welcome guide'),
+        ),
+      ),
+      PopupMenuItem(
+        value: _openHelp,
+        child: const ListTile(
+          leading: Icon(Icons.open_in_new),
+          title: Text('Open on GitHub'),
+        ),
+      ),
+    ],
+  );
+
+  Future<void> _showWelcomeGuide() async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) => const WelcomeGuide(),
+    );
+    if (_welcomeGuideSeen) return;
+    _welcomeGuideSeen = true;
+    await _saveSettings();
+  }
+
   Future<void> _openHelp() async {
     if (await launchUrl(_readmeUri, mode: LaunchMode.externalApplication)) {
       return;
@@ -223,6 +257,7 @@ class _KinesisHomeState extends State<KinesisHome> {
       _splitRawAndJpeg = state['splitRawAndJpeg'] as bool? ?? false;
       _vimKeys = state['vimKeys'] as bool? ?? true;
       _trashSources = state['trashSources'] as bool? ?? true;
+      _welcomeGuideSeen = state['welcomeGuideSeen'] as bool? ?? false;
       _jpegTemplate = state['jpegTemplate'] as String? ?? _jpegTemplate;
       _cr3Template = state['cr3Template'] as String? ?? _cr3Template;
       themeModeNotifier.value = ThemeMode.values.firstWhere(
@@ -245,6 +280,7 @@ class _KinesisHomeState extends State<KinesisHome> {
           .map((asset) => ImportedAsset.fromJson(asset as Map<String, dynamic>))
           .toList();
     });
+    if (!_welcomeGuideSeen) unawaited(_showWelcomeGuide());
     await _refreshLibraryIndex();
   }
 
@@ -278,6 +314,7 @@ class _KinesisHomeState extends State<KinesisHome> {
         'splitRawAndJpeg': _splitRawAndJpeg,
         'vimKeys': _vimKeys,
         'trashSources': _trashSources,
+        'welcomeGuideSeen': _welcomeGuideSeen,
         'jpegTemplate': _jpegTemplate,
         'cr3Template': _cr3Template,
         'themeMode': themeModeNotifier.value.name,
@@ -1182,11 +1219,7 @@ class _KinesisHomeState extends State<KinesisHome> {
           actions: MediaQuery.sizeOf(context).width < 700
               ? _compactAppBarActions()
               : [
-                  IconButton(
-                    onPressed: _openHelp,
-                    icon: const Icon(Icons.help_outline),
-                    tooltip: 'Help',
-                  ),
+                  _helpMenu(),
                   IconButton(
                     onPressed: _showSettings,
                     icon: const Icon(Icons.settings_outlined),
@@ -1302,11 +1335,7 @@ class _KinesisHomeState extends State<KinesisHome> {
   );
 
   List<Widget> _compactAppBarActions() => [
-    IconButton(
-      onPressed: _openHelp,
-      icon: const Icon(Icons.help_outline),
-      tooltip: 'Help',
-    ),
+    _helpMenu(),
     PopupMenuButton<String>(
       tooltip: 'More options',
       icon: const Icon(Icons.more_vert),

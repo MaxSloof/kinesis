@@ -31,13 +31,13 @@ values come from `pubspec.yaml` and are used for all platform builds. See
 
 - Review a source folder in single-image or grid view, with sorting and date
   grouping.
-- Pair same-named JPEG and Canon CR3 files for review, and use an embedded CR3
-  preview when a matching JPEG is unavailable.
+- Pair same-named JPEG and RAW files (CR3, NEF, ARW, DNG and others) for review,
+  and use an embedded RAW preview when a matching JPEG is unavailable.
 - Detect exact duplicates in the destination library using SHA-256 hashes.
-- Choose which files to import, including whether to keep JPEG, CR3, or both
+- Choose which files to import, including whether to keep the JPEG, the RAW, or both
   for a paired shot.
 - Organize imported files with configurable destination templates, optionally
-  keeping JPEG and CR3 files in separate folder trees.
+  keeping JPEG and RAW files in separate folder trees.
 - Browse media already in the library.
 - Run ingest and browsing without a cloud account or hosted backend.
 
@@ -131,7 +131,7 @@ and double-click a tile to open it in single-image view.
 Kinesis compares file contents using SHA-256, not just names. A matching file
 already in the library is not copied a second time. Items containing a
 duplicate default to **Delete both**; review that decision before confirming.
-If only one half of a JPEG/CR3 pair is already in the library, you can change
+If only one half of a JPEG/RAW pair is already in the library, you can change
 the decision to import the missing half.
 
 ## Destination templates
@@ -153,7 +153,7 @@ Templates accept these tokens:
 | `{originalName}` | Original filename, including its extension |
 | `{sourceFolder}` | Name of the folder containing the source file |
 | `{shoot}` | Shoot name from **Import options** for this import; omitted when empty |
-| `{camera}` | Camera make and model from EXIF or CR3 metadata, or `Unknown camera` |
+| `{camera}` | Camera make and model from EXIF or CR3 metadata (EXIF for other RAW formats), or `Unknown camera` |
 | `{ext}` | Lower-case file extension without the dot, such as `cr3` |
 
 `{shoot}` and `{camera}` are made safe for use as folder names: path separators
@@ -165,10 +165,10 @@ dropped, and separators left dangling at the end of a folder name are trimmed:
 `{year}/{shoot} - {day}` becomes `2026/17`, not `2026/ - 17`.
 
 The capture date is the first of these that is available: the EXIF
-`DateTimeOriginal` (JPEG and other images), the capture date stored in a CR3's
+`DateTimeOriginal` (JPEG and other images), the capture date stored in a RAW's
 metadata, a date in the file name (`IMG_20261017_143000`, `VID_…`, `DSC_…`,
 `2026-10-17_14-30-00` or `2026-10-17-143000`), and finally the file's
-last-modified time. A JPEG/CR3 pair uses one date, so both files land in the
+last-modified time. A JPEG/RAW pair uses one date, so both files land in the
 same folder. For example, with the default template, a photo taken on
 October 17, 2026 is imported into `2026/2026-10-17/`. Video dates come from the
 file name or last-modified time; the MP4/MOV creation time is not read because
@@ -183,7 +183,7 @@ modified times of the copies use the adjusted dates, and the confirm dialog
 says so. The setting applies to one import and is not saved.
 
 Enable **Use separate JPEG and CRAW folders** to configure distinct templates
-for JPEG and CR3 files. Their defaults are `JPEG/{year}/{year}-{month}-{day}`
+for JPEG and RAW files (the RAW button and folder keep their CR3/CRAW names). Their defaults are `JPEG/{year}/{year}-{month}-{day}`
 and `CRAW/{year}/{year}-{month}-{day}`. Other supported media types continue
 to use the general destination template. Templates must resolve to a location
 inside the selected library.
@@ -203,9 +203,9 @@ message if there isn't enough. Free space is read with `df` on macOS and Linux;
 on Android and Windows it can't be read, so the check is skipped.
 
 **Confirming the plan can move source files to Trash.** For an item with a
-JPEG/CR3 pair, the decision determines what is imported, but all source files
+JPEG/RAW pair, the decision determines what is imported, but all source files
 in that pair are included in cleanup. For example, **Keep JPEG** imports the
-JPEG and moves both the JPEG and CR3 source files to Trash. Duplicate source
+JPEG and moves both the JPEG and RAW source files to Trash. Duplicate source
 files are also included in cleanup by the default duplicate decision. Check
 the plan before confirming, and keep another backup of important media.
 

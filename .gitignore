@@ -49,3 +49,4 @@ app.*.map.json
 /.knownPackages
 /licenses/
 /ndk/
+/kinesis-release.jks

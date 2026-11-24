@@ -7,7 +7,7 @@ description: Cut a new Kinesis release. Use when the user asks to release, publi
 
 `pubspec.yaml` is the single source of truth for the version. CI
 (`.github/workflows/release.yml`) builds Linux (`.tar.gz`, `.deb`) and macOS
-(`.dmg`) installers when a `v<version>` tag is pushed, and attaches them to a
+(`.dmg`) installers and an Android `.apk` when a `v<version>` tag is pushed, and attaches them to a
 GitHub Release. The tag must equal `v` + the version name in `pubspec.yaml`, or
 CI fails. Full reference: `docs/releasing.md`.
 
@@ -53,4 +53,6 @@ CI fails. Full reference: `docs/releasing.md`.
 ## Known limitations
 
 - macOS builds are unsigned and not notarized, and Apple Silicon only.
-- Windows, Android, and iOS are not built by CI yet.
+- Android needs the signing secrets described in `docs/releasing.md`; tag
+  builds fail without them.
+- Windows and iOS are not built by CI yet.

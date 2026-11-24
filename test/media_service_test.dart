@@ -30,6 +30,19 @@ void main() {
     expect(items.single.jpeg!.name, 'IMG_0001.JPG');
   });
 
+  test('scan pairs non-Canon RAW files with their JPEG', () async {
+    final source = await Directory.systemTemp.createTemp('kinesis-scan-');
+    addTearDown(() => source.delete(recursive: true));
+    await File('${source.path}/DSC_0001.JPG').writeAsBytes([0xff, 0xd8, 0xff]);
+    await File('${source.path}/DSC_0001.NEF').writeAsBytes([1, 2, 3]);
+
+    final items = await MediaService().scan(source.path);
+
+    expect(items, hasLength(1));
+    expect(items.single.cr3!.name, 'DSC_0001.NEF');
+    expect(items.single.formats, ['JPEG', 'NEF']);
+  });
+
   test('SAF-backed media retains its display name and relative pairing path', () {
     final jpeg = MediaFile(
       path:

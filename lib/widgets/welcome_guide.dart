@@ -7,15 +7,14 @@ const _steps = [
     body:
         'Kinesis copies photos and videos from a camera card or folder into '
         'your library, verifies every copy with SHA-256, and can then move the '
-        'source files to Trash. This short guide shows the basics.',
+        'source files to Trash.',
   ),
   (
     icon: Icons.folder_outlined,
     title: 'Set your library',
     body:
         'Use Set library in the toolbar to choose the folder your media is '
-        'imported into. Files already in it are detected as duplicates and '
-        'never copied twice.',
+        'imported into. Kinesis never copies a file that is already in it.',
   ),
   (
     icon: Icons.folder_open,
@@ -31,22 +30,22 @@ const _steps = [
     body:
         'Step through shots with the arrow keys, or switch to grid view to '
         'select several at once. Decide per shot: A keeps both, S keeps the '
-        'JPEG, D keeps the RAW, F deletes both. Shots without a decision are '
-        'left alone. Shortcuts can be changed in Settings.',
+        'JPEG, D keeps the RAW, F deletes both. Kinesis leaves shots without '
+        'a decision alone. Change the shortcuts in Settings.',
   ),
   (
     icon: Icons.fact_check_outlined,
     title: 'Review the plan and import',
     body:
-        'Open the ingest plan with the button in the bottom corner, check what '
-        'will be copied and moved to Trash, and confirm only when it is right.',
+        'Open the ingest plan with the button in the bottom right corner. '
+        'Check what Kinesis will copy and move to Trash, then confirm.',
   ),
   (
     icon: Icons.help_outline,
-    title: 'Need this again?',
+    title: 'Replay this guide',
     body:
-        'Replay this guide any time from the Help menu in the toolbar, which '
-        'also links to the documentation on GitHub.',
+        'The Help menu in the toolbar replays this guide and links to the '
+        'documentation on GitHub.',
   ),
 ];
 
